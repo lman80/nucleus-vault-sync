@@ -161,8 +161,14 @@ export default class NucleusSyncPlugin extends Plugin {
         // Percentage first: it is the number people actually read. The file
         // name follows because when one file takes minutes, the count alone
         // looks stalled.
-        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
-        this.setStatus(`Nucleus ${pct}% · ${done}/${total} · ${what.split("/").pop() ?? what}`);
+        if (total <= 1) {
+          // A phase announcement, not a file count — "0% · 0/1" would be worse
+          // than useless here.
+          this.setStatus(`Nucleus: ${what}`);
+        } else {
+          const pct = Math.floor((done / total) * 100);
+          this.setStatus(`Nucleus ${pct}% · ${done}/${total} · ${what.split("/").pop() ?? what}`);
+        }
         report?.(`${done}/${total} — ${what}`);
       },
     };

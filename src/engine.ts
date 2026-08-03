@@ -309,6 +309,7 @@ export async function push(options: EngineOptions): Promise<PassResult> {
 
   const files = vaultFiles(app);
   const configOpts = options.config ?? { enabled: false, includeWorkspace: false };
+  onProgress(0, 1, "checking what has changed here…");
   const configPaths = await listConfigFiles(app, configOpts);
   const remote = await client.listDocumentsSlim();
   const remoteByPath = new Map(remote.filter((r) => !r.deleted_at).map((r) => [r.source_ref, r]));
@@ -489,6 +490,9 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   const { app, client, state, log = () => {}, onProgress = () => {} } = options;
   const result = emptyResult();
 
+  // The list itself takes several seconds on a large vault; without this the
+  // status bar sat on "syncing" with nothing to show for it.
+  onProgress(0, 1, "checking what is on the server…");
   const rows = await client.listDocumentsFull();
   let done = 0;
   let sinceSave = 0;
