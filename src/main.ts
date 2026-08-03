@@ -38,12 +38,24 @@ export default class NucleusSyncPlugin extends Plugin {
   private statusEl: HTMLElement | null = null;
   /** Newest change we have already reacted to, so a poll only acts on news. */
   private lastSeenChange: string | null = null;
+  /** What went wrong last, kept so it can be shown rather than only logged. */
+  lastError: string | null = null;
+  /** A one-line account of the last pass, for the settings screen. */
+  lastReport: string | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
     this.addSettingTab(new NucleusSettingTab(this.app, this));
 
     this.statusEl = this.addStatusBarItem();
+    this.statusEl.addClass("mod-clickable");
+    // "Last sync failed" with no way to see the reason is not a message, it is
+    // a shrug. Clicking now says what happened.
+    this.statusEl.onClickEvent(() => {
+      if (this.lastError) new Notice(`Nucleus: ${this.lastError}`, 15000);
+      else if (this.lastReport) new Notice(`Nucleus: ${this.lastReport}`, 8000);
+      else void this.syncNow();
+    });
     this.setStatus(this.configured ? "Nucleus: ready" : "Nucleus: not set up");
 
     this.addRibbonIcon("refresh-cw", "Sync with Nucleus", () => void this.syncNow());
@@ -146,8 +158,11 @@ export default class NucleusSyncPlugin extends Plugin {
         report?.(line);
       },
       onProgress: (done: number, total: number, what: string) => {
-        // The detail matters more than the count when one file takes minutes.
-        this.setStatus(`Nucleus ${done}/${total} · ${what.split("/").pop() ?? what}`);
+        // Percentage first: it is the number people actually read. The file
+        // name follows because when one file takes minutes, the count alone
+        // looks stalled.
+        const pct = total > 0 ? Math.floor((done / total) * 100) : 0;
+        this.setStatus(`Nucleus ${pct}% · ${done}/${total} · ${what.split("/").pop() ?? what}`);
         report?.(`${done}/${total} — ${what}`);
       },
     };
@@ -288,6 +303,7 @@ export default class NucleusSyncPlugin extends Plugin {
     this.applyingRemote = true;
     this.setStatus("Nucleus: syncing…");
     try {
+      this.lastError = null;
       const { pulled, pushed } = await syncBothWays(this.engineOptions());
       // Our own writes moved the watermark; record it so the watcher does not
       // immediately see them as somebody else's news.
@@ -295,9 +311,13 @@ export default class NucleusSyncPlugin extends Plugin {
       this.announce(pulled, pushed, quiet);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (!quiet) new Notice(`Nucleus: ${message}`);
+      this.lastError = message;
+      // Always tell them, even on a quiet background pass — a silent failure
+      // that only shows as three words in the status bar is how someone ends
+      // up believing their notes are synced when they are not.
+      new Notice(`Nucleus sync failed: ${message}`, 15000);
       console.error("[nucleus] sync failed", error);
-      this.setStatus("Nucleus: last sync failed");
+      this.setStatus("Nucleus: failed — click to see why");
     } finally {
       this.syncing = false;
       this.applyingRemote = false;
@@ -325,6 +345,10 @@ export default class NucleusSyncPlugin extends Plugin {
     if (pulled?.skipped) bits.push(`${pulled.skipped} big files skipped`);
 
     this.setStatus(bits.length ? `Nucleus: ${bits.join(", ")}` : "Nucleus: up to date");
+    this.lastReport =
+      (bits.length ? bits.join(", ") : "everything already matched") +
+      (failed ? ` · ${failed} file(s) could not transfer` : "") +
+      ` · ${new Date().toLocaleTimeString()}`;
 
     // Conflicts and failures are announced even on a quiet background pass: a
     // silently duplicated note is exactly the thing a person needs told.
@@ -335,7 +359,15 @@ export default class NucleusSyncPlugin extends Plugin {
       );
     }
     if (failed) {
-      new Notice(`Nucleus could not transfer ${failed} file(s). Syncing again will retry them.`, 8000);
+      const names = [...(pulled?.failed ?? []), ...(pushed?.failed ?? [])]
+        .slice(0, 3)
+        .map((f) => `${f.path}: ${f.reason}`)
+        .join("\n");
+      new Notice(
+        `Nucleus could not transfer ${failed} file(s). Syncing again retries them.\n${names}`,
+        15000,
+      );
+      this.lastError = names;
     }
     if (!quiet && !conflicts && !failed) {
       new Notice(bits.length ? `Nucleus: ${bits.join(", ")}` : "Nucleus: up to date");

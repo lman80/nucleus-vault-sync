@@ -71,3 +71,12 @@ Prefix every class with `nucleus-` to avoid colliding with themes and other plug
 }
 
 .nucleus-hint { font-size: 0.85em; opacity: 0.7; }
+
+/* Progress and the last-run report should be readable, not clipped. */
+.nucleus-log {
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 0.8em;
+  max-height: 12em;
+  overflow-y: auto;
+}

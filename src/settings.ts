@@ -98,6 +98,22 @@ export class NucleusSettingTab extends PluginSettingTab {
       .setDesc("Run the setup wizard again — it works out what needs moving and asks before doing it.")
       .addButton((b) => b.setButtonText("Open setup").onClick(() => this.plugin.openOnboarding()));
 
+    // What happened last, in full. The status bar has room for a few words;
+    // this is where the actual reason lives.
+    const last = this.plugin.lastError ?? this.plugin.lastReport;
+    if (last) {
+      const box = containerEl.createEl("div", {
+        cls: this.plugin.lastError ? "nucleus-warning" : "nucleus-secondary",
+      });
+      box.createEl("p", { text: this.plugin.lastError ? "Last sync failed" : "Last sync" });
+      box.createEl("pre", { text: last, cls: "nucleus-log" });
+      if (this.plugin.lastError) {
+        new Setting(box).addButton((b) =>
+          b.setButtonText("Try again").setCta().onClick(() => void this.plugin.syncNow()),
+        );
+      }
+    }
+
     containerEl.createEl("h3", { text: "Connection" });
 
     new Setting(containerEl)
