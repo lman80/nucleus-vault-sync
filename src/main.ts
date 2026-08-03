@@ -146,7 +146,8 @@ export default class NucleusSyncPlugin extends Plugin {
         report?.(line);
       },
       onProgress: (done: number, total: number, what: string) => {
-        this.setStatus(`Nucleus: ${done}/${total}`);
+        // The detail matters more than the count when one file takes minutes.
+        this.setStatus(`Nucleus ${done}/${total} · ${what.split("/").pop() ?? what}`);
         report?.(`${done}/${total} — ${what}`);
       },
     };

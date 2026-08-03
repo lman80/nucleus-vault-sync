@@ -533,7 +533,20 @@ export class NucleusClient {
    * is not a slow download — it is Obsidian being killed mid-sync with no error
    * anyone can catch or report.
    */
-  async getObject(storagePath: string): Promise<ArrayBuffer> {
+  /**
+   * `onProgress` reports bytes as they arrive, for the files where it matters.
+   *
+   * At this vault's measured 1.2 MB/s a 169 MB video takes about two and a half
+   * minutes, and without progress that is indistinguishable from a hang — which
+   * is exactly how it was reported: "stuck on 407 of 675". The bytes are read
+   * through a stream rather than in one lump so there is something to report;
+   * the request-bridge path below cannot stream at all, which is one more
+   * reason large files should not go that way.
+   */
+  async getObject(
+    storagePath: string,
+    onProgress?: (received: number, total: number | null) => void,
+  ): Promise<ArrayBuffer> {
     const label = `download ${storagePath}`;
 
     if (this.preferFetchForBinary) {
@@ -548,7 +561,29 @@ export class NucleusClient {
           const detail = await res.text().catch(() => "");
           throw this.httpError(res.status, detail, label);
         }
-        return res.arrayBuffer();
+        if (!onProgress || !res.body) return res.arrayBuffer();
+
+        const header = res.headers.get("content-length");
+        const total = header ? Number(header) : null;
+        const reader = res.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let received = 0;
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) {
+            chunks.push(value);
+            received += value.byteLength;
+            onProgress(received, Number.isFinite(total) ? total : null);
+          }
+        }
+        const out = new Uint8Array(received);
+        let offset = 0;
+        for (const chunk of chunks) {
+          out.set(chunk, offset);
+          offset += chunk.byteLength;
+        }
+        return out.buffer;
       });
     }
 

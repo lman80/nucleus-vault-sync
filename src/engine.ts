@@ -89,6 +89,13 @@ export function isExcluded(path: string): boolean {
   return EXCLUDED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
 }
 
+/** Bytes as a short human string, for progress lines. */
+function mb(bytes: number): string {
+  if (bytes >= 1_048_576) return `${(bytes / 1_048_576).toFixed(1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
 function isMarkdown(path: string): boolean {
   return path.toLowerCase().endsWith(".md");
 }
@@ -488,7 +495,15 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
 
   for (const row of rows) {
     done += 1;
-    onProgress(done, rows.length, row.source_ref);
+    // Name the size in the progress line as soon as the file is reached: a
+    // 169 MB video that says so is a wait, the same file in silence is a hang.
+    onProgress(
+      done,
+      rows.length,
+      (row.byte_size ?? 0) > 2_000_000
+        ? `${row.source_ref} (${mb(row.byte_size ?? 0)})`
+        : row.source_ref,
+    );
 
     const configOpts = options.config ?? { enabled: false, includeWorkspace: false };
 
@@ -607,7 +622,13 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
       const bytes =
         row.kind === "attachment" && row.storage_path
           ? await verifiedBytes(
-              await client.getObject(row.storage_path),
+              await client.getObject(row.storage_path, (received, total) => {
+                // Big files are the ones that look frozen, so say how far in
+                // we are. Small ones would just flicker.
+                if ((total ?? row.byte_size ?? 0) > 2_000_000) {
+                  onProgress(done, rows.length, `${row.source_ref} — ${mb(received)} of ${mb(total ?? row.byte_size ?? 0)}`);
+                }
+              }),
               row.content_hash,
               row.source_ref,
             )
