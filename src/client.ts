@@ -63,7 +63,20 @@ const RETRY_BASE_MS = 1500;
  * way to stop it — but the sync gets to move on, and the timeout counts as
  * transient so the retry loop tries again.
  */
-const REST_TIMEOUT_MS = 60_000;
+/**
+ * How long to wait for a data request before treating it as dead.
+ *
+ * Was 60 s, which is the wrong shape of patience. A healthy reply to any of
+ * these takes about two seconds; sixty seconds only ever means the path is
+ * broken, and spending a full minute discovering that — then retrying — leaves
+ * someone staring at "checking what is on the server" with no idea it has
+ * already given up once.
+ *
+ * The first attempt is short so a dead route is obvious immediately, and later
+ * attempts are more patient so a genuinely slow connection still succeeds.
+ */
+const REST_TIMEOUT_MS = 12_000;
+const REST_TIMEOUT_MAX_MS = 45_000;
 
 /** Well under the 20–50 MB danger zone, and only consulted when the caller has
  *  turned the `fetch` path off. */
@@ -212,7 +225,11 @@ export class NucleusClient {
         // too large — telling someone to check the URL sends them to look at
         // exactly the wrong thing.
         /took longer than/.test(detail)
-          ? `${label}: ${detail}. The server is reachable but the reply did not finish in time — usually a slow connection or a very large response. Syncing again will retry.`
+          ? `${label}: ${detail}.\n\nThe request went out but nothing came back. If this device is on ` +
+            `Tailscale, that address routes privately rather than over the internet — and a ` +
+            `half-connected Tailscale gives exactly this: the name resolves, the traffic goes ` +
+            `nowhere. Reconnect Tailscale, or turn it off entirely; the same address works either ` +
+            `way. Otherwise it is an ordinary connection problem and syncing again will retry.`
           : `${label}: could not reach ${this.host} — ${detail}. Check the server URL, your connection, and that Nucleus is running.`,
       );
     }
@@ -247,9 +264,18 @@ export class NucleusClient {
 
   // ------------------------------------------------------------------- retry
 
+  /** Attempt N's timeout: short at first, more patient later. */
+  private timeoutFor(attempt: number): number {
+    return Math.min(REST_TIMEOUT_MS * attempt, REST_TIMEOUT_MAX_MS);
+  }
+
+  /** Which attempt withRetry is on, so request closures can scale their timeout. */
+  private attempt = 1;
+
   private async withRetry<T>(work: () => Promise<T>): Promise<T> {
     let last: unknown;
     for (let attempt = 1; attempt <= RETRY_ATTEMPTS; attempt += 1) {
+      this.attempt = attempt;
       try {
         return await work();
       } catch (error) {
@@ -316,7 +342,7 @@ export class NucleusClient {
             body: init.body,
             throw: false,
           }),
-          REST_TIMEOUT_MS,
+          this.timeoutFor(this.attempt),
           label,
         );
       } catch (error) {
@@ -546,7 +572,7 @@ export class NucleusClient {
             headers: { ...this.authHeaders, "User-Agent": USER_AGENT },
             throw: false,
           }),
-          REST_TIMEOUT_MS,
+          this.timeoutFor(this.attempt),
           label,
         );
       } catch (error) {
@@ -683,7 +709,7 @@ export class NucleusClient {
             headers: { ...this.authHeaders, "User-Agent": USER_AGENT },
             throw: false,
           }),
-          REST_TIMEOUT_MS,
+          this.timeoutFor(this.attempt),
           label,
         );
       } catch (error) {
@@ -757,7 +783,7 @@ export class NucleusClient {
             body: bytes,
             throw: false,
           }),
-          REST_TIMEOUT_MS,
+          this.timeoutFor(this.attempt),
           label,
         );
       } catch (error) {
