@@ -565,16 +565,50 @@ export class NucleusClient {
 
         const header = res.headers.get("content-length");
         const total = header ? Number(header) : null;
+        // Fill ONE buffer, sized up front, rather than collecting chunks and
+        // copying them into a second one at the end.
+        //
+        // The first version did the latter, which meant peak memory of twice
+        // the file: 98 MB for a 49 MB video, and over 340 MB for the 169 MB
+        // one. On an iPhone that is not a slow download, it is a dead app —
+        // and it was observed doing exactly that, fetching a 49 MB file
+        // completely and then re-requesting it three minutes later.
+        //
+        // Ironic, since this streaming path was added to SHOW progress. It
+        // reported nicely right up to the crash.
         const reader = res.body.getReader();
-        const chunks: Uint8Array[] = [];
         let received = 0;
+
+        if (total !== null && Number.isFinite(total) && total > 0) {
+          const out = new Uint8Array(total);
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (!value) continue;
+            // A server that sends more than it promised would corrupt memory
+            // here, so stop rather than write past the end.
+            if (received + value.byteLength > total) {
+              throw new Error(
+                `${label}: server sent more than the ${total} bytes it declared`,
+              );
+            }
+            out.set(value, received);
+            received += value.byteLength;
+            onProgress(received, total);
+          }
+          return received === total ? out.buffer : out.slice(0, received).buffer;
+        }
+
+        // No content-length: fall back to collecting, which is the only option
+        // left, and is why the header is preferred.
+        const chunks: Uint8Array[] = [];
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           if (value) {
             chunks.push(value);
             received += value.byteLength;
-            onProgress(received, Number.isFinite(total) ? total : null);
+            onProgress(received, null);
           }
         }
         const out = new Uint8Array(received);
