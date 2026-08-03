@@ -70,6 +70,9 @@ export interface PassResult {
   unchanged: number;
   /** Deliberately not fetched — e.g. an attachment above this device's limit. */
   skipped: number;
+  /** Files still to come, and their weight, after this pass. */
+  outstanding: number;
+  outstandingBytes: number;
   conflicts: { path: string; savedAs: string }[];
   failed: { path: string; reason: string }[];
 }
@@ -81,6 +84,8 @@ const emptyResult = (): PassResult => ({
   tombstoned: 0,
   unchanged: 0,
   skipped: 0,
+  outstanding: 0,
+  outstandingBytes: 0,
   conflicts: [],
   failed: [],
 });

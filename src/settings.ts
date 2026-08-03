@@ -105,7 +105,7 @@ export class NucleusSettingTab extends PluginSettingTab {
       const box = containerEl.createEl("div", {
         cls: this.plugin.lastError ? "nucleus-warning" : "nucleus-secondary",
       });
-      box.createEl("p", { text: this.plugin.lastError ? "Last sync failed" : "Last sync" });
+      box.createEl("p", { text: this.plugin.lastError ? "Last sync failed" : "How sync is doing" });
       box.createEl("pre", { text: last, cls: "nucleus-log" });
       if (this.plugin.lastError) {
         new Setting(box).addButton((b) =>

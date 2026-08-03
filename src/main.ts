@@ -40,8 +40,11 @@ export default class NucleusSyncPlugin extends Plugin {
   private lastSeenChange: string | null = null;
   /** What went wrong last, kept so it can be shown rather than only logged. */
   lastError: string | null = null;
-  /** A one-line account of the last pass, for the settings screen. */
+  /** A plain-English account of the last pass. */
   lastReport: string | null = null;
+  private lastSyncAt: Date | null = null;
+  private outstanding = 0;
+  private outstandingBytes = 0;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -51,11 +54,7 @@ export default class NucleusSyncPlugin extends Plugin {
     this.statusEl.addClass("mod-clickable");
     // "Last sync failed" with no way to see the reason is not a message, it is
     // a shrug. Clicking now says what happened.
-    this.statusEl.onClickEvent(() => {
-      if (this.lastError) new Notice(`Nucleus: ${this.lastError}`, 15000);
-      else if (this.lastReport) new Notice(`Nucleus: ${this.lastReport}`, 8000);
-      else void this.syncNow();
-    });
+    this.statusEl.onClickEvent(() => new Notice(this.summary(), 15000));
     this.setStatus(this.configured ? "Nucleus: ready" : "Nucleus: not set up");
 
     this.addRibbonIcon("refresh-cw", "Sync with Nucleus", () => void this.syncNow());
@@ -93,6 +92,48 @@ export default class NucleusSyncPlugin extends Plugin {
 
   get configured(): boolean {
     return Boolean(this.settings.url && this.settings.key && this.settings.vaultName);
+  }
+
+  /**
+   * What a person actually wants to know, in sentences.
+   *
+   * This used to report "120 down, 3 up", which is my bookkeeping, not an
+   * answer — it says nothing about whether the vault is finished, when it last
+   * worked, or what to do next.
+   */
+  private summary(): string {
+    if (!this.configured) return "Nucleus is not set up yet. Open Settings → Nucleus Vault Sync.";
+
+    const when = this.lastSyncAt ? `Last synced ${this.ago(this.lastSyncAt)}.` : "Has not synced yet.";
+
+    if (this.lastError) {
+      return `Something went wrong.\n\n${this.lastError}\n\n${when} Syncing again will retry — nothing has been lost.`;
+    }
+    if (this.syncing) {
+      return `Syncing now.\n\n${this.outstanding > 0 ? `${this.outstanding} files still to download (${this.mb(this.outstandingBytes)}).` : ""}`.trim();
+    }
+    if (this.outstanding > 0) {
+      return (
+        `Your notes are here. ${this.outstanding} attachment${this.outstanding === 1 ? "" : "s"} ` +
+        `still to download — ${this.mb(this.outstandingBytes)}.\n\n` +
+        `Leave Obsidian open and it will keep going. On iPhone and iPad it pauses when you ` +
+        `switch away, and picks up when you come back.\n\n${when}`
+      );
+    }
+    return `Everything is up to date.\n\n${when}${this.lastReport ? `\n\n${this.lastReport}` : ""}`;
+  }
+
+  private ago(then: Date): string {
+    const secs = Math.round((Date.now() - then.getTime()) / 1000);
+    if (secs < 60) return "just now";
+    if (secs < 3600) return `${Math.round(secs / 60)} minute${Math.round(secs / 60) === 1 ? "" : "s"} ago`;
+    return `${Math.round(secs / 3600)} hour${Math.round(secs / 3600) === 1 ? "" : "s"} ago`;
+  }
+
+  private mb(bytes: number): string {
+    if (bytes >= 1_073_741_824) return `${(bytes / 1_073_741_824).toFixed(1)} GB`;
+    if (bytes >= 1_048_576) return `${Math.round(bytes / 1_048_576)} MB`;
+    return `${Math.round(bytes / 1024)} KB`;
   }
 
   private setStatus(text: string): void {
@@ -350,11 +391,20 @@ export default class NucleusSyncPlugin extends Plugin {
     if (pushed?.tombstoned) bits.push(`${pushed.tombstoned} deleted`);
     if (pulled?.skipped) bits.push(`${pulled.skipped} big files skipped`);
 
-    this.setStatus(bits.length ? `Nucleus: ${bits.join(", ")}` : "Nucleus: up to date");
-    this.lastReport =
-      (bits.length ? bits.join(", ") : "everything already matched") +
-      (failed ? ` · ${failed} file(s) could not transfer` : "") +
-      ` · ${new Date().toLocaleTimeString()}`;
+    this.lastSyncAt = new Date();
+    this.outstanding = pulled?.outstanding ?? 0;
+    this.outstandingBytes = pulled?.outstandingBytes ?? 0;
+
+    // The status bar answers "am I done?", not "what did you just do?".
+    this.setStatus(
+      this.outstanding > 0
+        ? `Nucleus: ${this.mb(this.outstandingBytes)} to go`
+        : "Nucleus: up to date",
+    );
+
+    this.lastReport = bits.length
+      ? `This sync: ${bits.join(", ")}.`
+      : "Nothing had changed since last time.";
 
     // Conflicts and failures are announced even on a quiet background pass: a
     // silently duplicated note is exactly the thing a person needs told.
@@ -376,7 +426,14 @@ export default class NucleusSyncPlugin extends Plugin {
       this.lastError = names;
     }
     if (!quiet && !conflicts && !failed) {
-      new Notice(bits.length ? `Nucleus: ${bits.join(", ")}` : "Nucleus: up to date");
+      new Notice(
+        this.outstanding > 0
+          ? `Nucleus: notes are up to date. ${this.mb(this.outstandingBytes)} of attachments still downloading.`
+          : bits.length
+            ? `Nucleus: ${bits.join(", ")} — everything is up to date.`
+            : "Nucleus: everything is already up to date.",
+        6000,
+      );
     }
   }
 
