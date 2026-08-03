@@ -498,7 +498,9 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // The list itself takes several seconds on a large vault; without this the
   // status bar sat on "syncing" with nothing to show for it.
   onProgress(0, 1, "checking what is on the server…");
-  const fetched = await client.listDocumentsFull();
+  // Metadata only — see client.listDocumentsMeta for why this matters. Bodies
+  // are fetched below, for the short list that is actually going to be written.
+  const fetched = await client.listDocumentsMeta();
 
   // Two phases: everything that makes the vault WORK, then the heavy files.
   //
@@ -518,6 +520,53 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     ...fetched.filter(isHeavy).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
   ];
   const noteCount = fetched.filter((r) => !isHeavy(r)).length;
+  // Work out the short list before fetching any text: only notes whose content
+  // differs from what is on disk need their body at all, and on a settled vault
+  // that is almost none of them.
+  onProgress(0, 1, "working out what changed…");
+  const needsBody: string[] = [];
+  for (const row of rows) {
+    if (row.deleted_at || row.kind === "attachment") continue;
+    const path = normalizePath(row.source_ref);
+    const existing = app.vault.getAbstractFileByPath(path);
+    const file = existing instanceof TFileClass ? existing : null;
+    let onDisk: string | null = null;
+    if (file) {
+      try {
+        onDisk = await sha256(await app.vault.read(file));
+      } catch {
+        onDisk = null;
+      }
+    } else if (isConfigPath(app, row.source_ref)) {
+      const info = await statConfigFile(app, row.source_ref);
+      if (info) {
+        try {
+          onDisk = info.binary
+            ? await sha256(await readConfigBinary(app, row.source_ref))
+            : await sha256(await readConfigText(app, row.source_ref));
+        } catch {
+          onDisk = null;
+        }
+      }
+    }
+    if (decide({ row, onDisk, record: state[row.source_ref] }).action !== "none") {
+      needsBody.push(row.id);
+    }
+  }
+
+  if (needsBody.length > 0) {
+    onProgress(0, 1, `fetching ${needsBody.length} note${needsBody.length === 1 ? "" : "s"}…`);
+    const bodies = await client.getDocumentBodies(needsBody);
+    for (const row of rows) {
+      const body = bodies.get(row.id);
+      if (body) {
+        row.raw = body.raw;
+        row.body = body.body;
+        row.frontmatter = body.frontmatter;
+      }
+    }
+  }
+
   let done = 0;
   let sinceSave = 0;
   let remaining = rows.reduce((sum, r) => sum + (r.byte_size ?? 0), 0);

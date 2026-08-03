@@ -208,7 +208,12 @@ export class NucleusClient {
     const detail = this.redact(messageOf(error));
     if (TRANSIENT.test(detail)) {
       return new TransportError(
-        `${label}: could not reach ${this.host} — ${detail}. Check the server URL, your connection, and that Nucleus is running.`,
+        // A timeout means the server answered and the reply was too slow or
+        // too large — telling someone to check the URL sends them to look at
+        // exactly the wrong thing.
+        /took longer than/.test(detail)
+          ? `${label}: ${detail}. The server is reachable but the reply did not finish in time — usually a slow connection or a very large response. Syncing again will retry.`
+          : `${label}: could not reach ${this.host} — ${detail}. Check the server URL, your connection, and that Nucleus is running.`,
       );
     }
     return new Error(`${label} failed: ${detail}`);
@@ -259,7 +264,7 @@ export class NucleusClient {
   private withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new TransportError(`${label}: timed out after ${Math.round(ms / 1000)}s`));
+        reject(new TransportError(`${label}: took longer than ${Math.round(ms / 1000)}s`));
       }, ms);
       work.then(
         (value) => {
@@ -441,6 +446,44 @@ export class NucleusClient {
   }
 
   /** Full rows — body, frontmatter, raw. Only a restore needs this much. */
+  /**
+   * Metadata for every row — enough to decide what to do, and nothing more.
+   *
+   * This exists because `listDocumentsFull` turned out to be a disaster once
+   * plugins were synced: `select=*` pulls every note's text AND every plugin's
+   * JavaScript, which measured **70 MB** for this vault, fetched on every
+   * single sync before a byte of actual content moved. On a phone it also goes
+   * through Obsidian's base64 bridge, so nearer 94 MB.
+   *
+   * Deciding needs `content_hash`, not the content. So take the metadata, work
+   * out the short list, and fetch bodies only for files that are actually going
+   * to be written — see `getDocumentBodies`.
+   */
+  async listDocumentsMeta(): Promise<DocumentRow[]> {
+    return this.listPaged<DocumentRow>(
+      "id,vault,source_ref,source_app,kind,title,content_hash,byte_size,storage_path,mime_type,file_modified_at,updated_at,deleted_at",
+    );
+  }
+
+  /**
+   * The text of specific notes, in batches.
+   *
+   * Batched by id rather than fetched one at a time: 400 individual round trips
+   * on a 260 ms link is nearly two minutes of latency and nothing else.
+   */
+  async getDocumentBodies(ids: string[]): Promise<Map<string, DocumentRow>> {
+    const out = new Map<string, DocumentRow>();
+    const BATCH = 40;
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const slice = ids.slice(i, i + BATCH);
+      const res = await this.rest(
+        `/rest/v1/documents?select=id,raw,body,frontmatter&id=in.(${slice.join(",")})`,
+      );
+      for (const row of this.rows<DocumentRow>(res)) out.set(row.id, row);
+    }
+    return out;
+  }
+
   async listDocumentsFull(): Promise<DocumentRow[]> {
     return this.listPaged<DocumentRow>("*");
   }
