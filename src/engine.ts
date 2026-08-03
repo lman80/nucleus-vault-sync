@@ -493,20 +493,37 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // The list itself takes several seconds on a large vault; without this the
   // status bar sat on "syncing" with nothing to show for it.
   onProgress(0, 1, "checking what is on the server…");
-  const rows = await client.listDocumentsFull();
+  const fetched = await client.listDocumentsFull();
+
+  // Smallest first, deliberately.
+  //
+  // iOS suspends Obsidian the moment the screen locks, so a phone gets the sync
+  // in short bursts rather than one long run. In path order a single 169 MB
+  // video sits at the front of a burst and blocks every note behind it —
+  // measured on a real phone: 40 MB of 1,466 MB after several sessions, and
+  // barely a note to show for it.
+  //
+  // Sorted by size, the first burst brings down all 447 notes (2.6 MB total)
+  // and the small attachments, so the vault is usable immediately and the
+  // videos trickle in over later sessions instead of holding everything up.
+  const rows = [...fetched].sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0));
   let done = 0;
   let sinceSave = 0;
+  let remaining = rows.reduce((sum, r) => sum + (r.byte_size ?? 0), 0);
 
   for (const row of rows) {
     done += 1;
-    // Name the size in the progress line as soon as the file is reached: a
-    // 169 MB video that says so is a wait, the same file in silence is a hang.
+    // Name the size as soon as the file is reached — a 169 MB video that says
+    // so is a wait; the same file in silence is a hang — and carry how much of
+    // the whole job is left, so an interrupted sync can be judged rather than
+    // guessed at.
+    remaining -= row.byte_size ?? 0;
     onProgress(
       done,
       rows.length,
-      (row.byte_size ?? 0) > 2_000_000
+      ((row.byte_size ?? 0) > 2_000_000
         ? `${row.source_ref} (${mb(row.byte_size ?? 0)})`
-        : row.source_ref,
+        : row.source_ref) + (remaining > 5_000_000 ? ` · ${mb(remaining)} left` : ""),
     );
 
     const configOpts = options.config ?? { enabled: false, includeCaches: false };
