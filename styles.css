@@ -1,0 +1,19 @@
+/*
+Styles for Nucleus Vault Sync.
+
+Obsidian loads this file automatically when the plugin is enabled — it must sit next to
+main.js and manifest.json in <Vault>/.obsidian/plugins/nucleus-vault-sync/.
+
+Use Obsidian's CSS variables (--text-muted, --text-error, --background-modifier-border, …)
+rather than hardcoded colors, so the plugin follows the user's theme in light and dark mode.
+Prefix every class with `nucleus-` to avoid colliding with themes and other plugins.
+*/
+
+.nucleus-sync-status {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.nucleus-sync-error {
+	color: var(--text-error);
+}

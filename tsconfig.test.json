@@ -1,0 +1,13 @@
+{
+	// Typecheck-only config for the test files. Same settings as the shipping config, but
+	// with node types added because the tests use node:test / node:assert and run under tsx.
+	// Nothing typechecked here is bundled into main.js.
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["node"]
+	},
+	"include": ["src/**/*.test.ts"],
+	// Must be reset: "exclude" is inherited through "extends", and the base config excludes
+	// exactly these files.
+	"exclude": []
+}

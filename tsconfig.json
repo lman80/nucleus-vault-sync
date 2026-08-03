@@ -1,0 +1,42 @@
+{
+	// Config for the code that actually ships inside main.js.
+	//
+	// Deliberately NO "types": ["node"] and no "node" in "lib": the plugin must run in
+	// Obsidian's iOS WebView, where fs/path/crypto/Buffer do not exist. Leaving node types
+	// out means `Buffer`, `process`, `require`, `__dirname` etc. are compile errors here
+	// instead of runtime crashes on the phone.
+	//
+	// The test file (src/core/*.test.ts) imports node:test and therefore DOES need node
+	// types — it is excluded here and typechecked by tsconfig.test.json instead, so node
+	// globals can never leak into shipped code. `npm run typecheck` runs both projects.
+	"compilerOptions": {
+		"inlineSourceMap": true,
+		"inlineSources": true,
+		"module": "ESNext",
+		"target": "ES2021",
+		"strict": true,
+		"noImplicitReturns": true,
+		"noFallthroughCasesInSwitch": true,
+		// NOTE: the official sample also sets "noUncheckedIndexedAccess": true. It is left OFF
+		// here because the existing src/core/parse.ts (regex-match and split indexing) does not
+		// compile under it, and that code is not to be modified. Turn it on if parse.ts is ever
+		// reworked to guard its index accesses.
+		"moduleResolution": "bundler",
+		"isolatedModules": true,
+		"skipLibCheck": true,
+		"forceConsistentCasingInFileNames": true,
+		"allowSyntheticDefaultImports": true,
+		// ES2021 + DOM: src/core uses crypto.subtle and TextEncoder, both of which live in
+		// the DOM lib and are available in Obsidian on desktop and on iOS (see SPEC-API §7.2).
+		"lib": ["ES2021", "DOM"],
+		// MUST stay empty. With no "types" field at all, TypeScript auto-includes every
+		// package under node_modules/@types — including @types/node, which is a devDependency
+		// for the build scripts — and `Buffer`/`process`/`require` would silently typecheck in
+		// shipping code and then throw on iOS. An empty list disables that auto-inclusion.
+		// It does not affect `import`ed types such as @types/js-yaml, which resolve normally.
+		"types": [],
+		"noEmit": true
+	},
+	"include": ["src/**/*.ts"],
+	"exclude": ["src/**/*.test.ts"]
+}
