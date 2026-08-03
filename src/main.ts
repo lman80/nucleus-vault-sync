@@ -25,7 +25,7 @@
 import { Notice, Plugin, TFile, debounce } from "obsidian";
 
 import { NucleusClient } from "./client";
-import { pull, push, syncBothWays, setAside, verifyAndRepair, isExcluded, type PassResult } from "./engine";
+import { pull, push, syncBothWays, setAside, replaceLocal, verifyAndRepair, isExcluded, type PassResult } from "./engine";
 import { OnboardingModal, SET_ASIDE_FOLDER, type MergeChoice, type Situation } from "./onboarding";
 import { DEFAULT_SETTINGS, NucleusSettingTab, type NucleusSettings } from "./settings";
 
@@ -191,6 +191,17 @@ export default class NucleusSyncPlugin extends Plugin {
             movedAside = aside.moved;
             pulled = await pull(options);
             pushed = await push(options);
+          } else if (mergeChoice === "replace") {
+            // Deliberately clears this device's sync record too: the files it
+            // described are gone, and a record pointing at absent files would
+            // make the next pass think they had been deleted on purpose.
+            report("Clearing this vault…");
+            const cleared = await replaceLocal(this.app, report);
+            movedAside = 0;
+            this.settings.state = {};
+            await this.saveSettings();
+            report(`Removed ${cleared.removed}. Downloading…`);
+            pulled = await pull(this.engineOptions(report));
           } else if (mergeChoice === "upload-mine") {
             // Local wins: send everything up first, so anything that differs is
             // resolved in the vault's favour, then bring down what is missing.

@@ -191,8 +191,17 @@ export async function describeFile(
  * every byte, keeps the folder structure, and leaves the result obvious: your
  * notes are in one place, the ones from your Nucleus are where they belong.
  *
- * Uses `fileManager.renameFile` rather than `vault.rename` so links between the
- * moved notes are rewritten and keep working.
+ * Uses `vault.rename`, NOT `fileManager.renameFile`.
+ *
+ * `renameFile` rewrites links that point at the moved file — which sounds
+ * right, and in bulk is a disaster: Obsidian raises its "update internal links?"
+ * dialog once per file, so setting aside a few hundred notes means a few hundred
+ * prompts. Reported from a real run.
+ *
+ * It is also unnecessary here. Obsidian resolves `[[wikilinks]]` by note name
+ * across the whole vault, not by path, so moving every file together into one
+ * folder leaves those links resolving exactly as before, with nothing rewritten
+ * and nothing to confirm.
  */
 export async function setAside(
   app: App,
@@ -211,7 +220,7 @@ export async function setAside(
     const target = normalizePath(`${folderName}/${file.path}`);
     try {
       await ensureParentFolders(app, target);
-      await app.fileManager.renameFile(file, target);
+      await app.vault.rename(file, target);
       moved += 1;
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
@@ -248,6 +257,36 @@ async function verifiedBytes(
     );
   }
   return bytes;
+}
+
+
+/**
+ * Empty the vault, so the layer's copy can be the only copy.
+ *
+ * The "I do not care about what is here, just give me my vault" answer, which
+ * had no button at all in the first version — leaving someone whose sync was
+ * interrupted with no way to simply start over.
+ *
+ * Files go to Obsidian's trash rather than being destroyed: this is the most
+ * destructive choice on offer, so it should still be the one that can be undone.
+ */
+export async function replaceLocal(
+  app: App,
+  log: (line: string) => void = () => {},
+): Promise<{ removed: number; failed: { path: string; reason: string }[] }> {
+  const failed: { path: string; reason: string }[] = [];
+  let removed = 0;
+  for (const file of vaultFiles(app)) {
+    try {
+      await app.fileManager.trashFile(file);
+      removed += 1;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`could not remove ${file.path}: ${reason}`);
+      failed.push({ path: file.path, reason });
+    }
+  }
+  return { removed, failed };
 }
 
 /**

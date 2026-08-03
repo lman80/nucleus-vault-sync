@@ -26,7 +26,7 @@ import { vaultFiles } from "./engine";
 export type Situation = "fresh" | "upload" | "restore" | "merge";
 
 /** How to resolve a first sync where both sides already have files. */
-export type MergeChoice = "set-aside" | "side-by-side" | "upload-mine";
+export type MergeChoice = "set-aside" | "side-by-side" | "upload-mine" | "replace";
 
 /** Where set-aside puts what was already here. */
 export const SET_ASIDE_FOLDER = "Before Nucleus";
@@ -401,6 +401,19 @@ export class OnboardingModal extends Modal {
       )
       .addButton((b) =>
         b.setButtonText("Do this").onClick(() => { this.mergeChoice = "side-by-side"; this.renderRun(); }),
+      );
+
+    new Setting(el)
+      .setName("Throw away what is here and download a fresh copy")
+      .setDesc(
+        `Removes the ${s.vaultFileCount} file${s.vaultFileCount === 1 ? "" : "s"} currently in this ` +
+          `vault, then downloads all ${s.layerFileCount} from your Nucleus. Use this when what is ` +
+          `here is left over from a sync that did not finish and you just want a clean copy. ` +
+          `Removed files go to Obsidian's trash, so it is undoable — and nothing in your Nucleus ` +
+          `is touched.`,
+      )
+      .addButton((b) =>
+        b.setButtonText("Start clean").setWarning().onClick(() => { this.mergeChoice = "replace"; this.renderRun(); }),
       );
 
     new Setting(el)
