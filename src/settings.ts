@@ -36,6 +36,18 @@ export interface NucleusSettings {
   state: SyncState;
   /** Set once the wizard has run, so it does not reappear every launch. */
   onboarded: boolean;
+  /**
+   * Which attachments this device wants.
+   *
+   * Notes are ~2 MB and arrive in seconds; attachments are the other 1.4 GB and
+   * are limited by the home upload at the far end (measured: ~1.2 MB/s, so about
+   * twenty minutes). Most devices — phones especially — do not want all of that,
+   * and waiting for it makes the notes feel slow when they were never the
+   * problem.
+   */
+  attachments: "all" | "under-limit" | "none";
+  /** Size ceiling for "under-limit", in bytes. */
+  attachmentLimitBytes: number;
 }
 
 export const DEFAULT_SETTINGS: NucleusSettings = {
@@ -49,6 +61,8 @@ export const DEFAULT_SETTINGS: NucleusSettings = {
   maxRequestUrlBinaryBytes: 8 * 1024 * 1024,
   state: {},
   onboarded: false,
+  attachments: "under-limit",
+  attachmentLimitBytes: 25 * 1024 * 1024,
 };
 
 export class NucleusSettingTab extends PluginSettingTab {
@@ -149,6 +163,44 @@ export class NucleusSettingTab extends PluginSettingTab {
           this.plugin.rescheduleTimer();
         }),
       );
+
+    containerEl.createEl("h3", { text: "Attachments" });
+
+    new Setting(containerEl)
+      .setName("Which attachments to keep on this device")
+      .setDesc(
+        "Your notes always sync, and they are small — they arrive in seconds. Attachments are " +
+          "the bulk of a vault and are limited by your home connection, so a phone rarely wants " +
+          "all of them. Notes that reference a missing attachment still open fine.",
+      )
+      .addDropdown((d) =>
+        d
+          .addOption("all", "Everything, including video")
+          .addOption("under-limit", "Only smaller files (recommended)")
+          .addOption("none", "Notes only")
+          .setValue(this.plugin.settings.attachments)
+          .onChange(async (v) => {
+            this.plugin.settings.attachments = v as "all" | "under-limit" | "none";
+            await this.plugin.saveSettings();
+            this.display();
+          }),
+      );
+
+    if (this.plugin.settings.attachments === "under-limit") {
+      new Setting(containerEl)
+        .setName("Skip attachments larger than (MB)")
+        .addText((t) =>
+          t
+            .setValue(String(Math.round(this.plugin.settings.attachmentLimitBytes / 1048576)))
+            .onChange(async (v) => {
+              const mb = Number(v);
+              if (Number.isFinite(mb) && mb > 0) {
+                this.plugin.settings.attachmentLimitBytes = Math.round(mb * 1048576);
+                await this.plugin.saveSettings();
+              }
+            }),
+        );
+    }
 
     containerEl.createEl("h3", { text: "Large files" });
 

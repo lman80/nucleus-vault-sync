@@ -43,6 +43,9 @@ export interface EngineOptions {
   log?: (line: string) => void;
   /** Report progress for long passes; `done`/`total` are file counts. */
   onProgress?: (done: number, total: number, what: string) => void;
+  /** Which attachments this device wants downloaded. Notes always come down. */
+  attachments?: "all" | "under-limit" | "none";
+  attachmentLimitBytes?: number;
 }
 
 export interface PassResult {
@@ -51,6 +54,8 @@ export interface PassResult {
   deletedLocally: number;
   tombstoned: number;
   unchanged: number;
+  /** Deliberately not fetched — e.g. an attachment above this device's limit. */
+  skipped: number;
   conflicts: { path: string; savedAs: string }[];
   failed: { path: string; reason: string }[];
 }
@@ -61,6 +66,7 @@ const emptyResult = (): PassResult => ({
   deletedLocally: 0,
   tombstoned: 0,
   unchanged: 0,
+  skipped: 0,
   conflicts: [],
   failed: [],
 });
@@ -227,6 +233,26 @@ export async function push(options: EngineOptions): Promise<PassResult> {
 
     try {
       const existing = remoteByPath.get(file.path);
+
+      // Cheap check first. If the file is the same size and has the same
+      // modified time as when we last agreed, and the layer still holds the
+      // hash we recorded, nothing can have changed — so do not open it.
+      //
+      // Without this, every pass read and hashed the entire vault. On a 1.4 GB
+      // vault that is minutes of disk per sync, on a phone it is worse, and it
+      // happens even when the answer is "nothing to do".
+      const record = state[file.path];
+      if (
+        existing &&
+        record &&
+        record.size === file.stat.size &&
+        record.mtime === file.stat.mtime &&
+        record.layerHash === existing.content_hash
+      ) {
+        result.unchanged += 1;
+        continue;
+      }
+
       const row = await describeFile(app, file, vaultName);
 
       if (existing && existing.content_hash === row.content_hash) {
@@ -234,6 +260,8 @@ export async function push(options: EngineOptions): Promise<PassResult> {
         state[file.path] = {
           layerHash: row.content_hash ?? null,
           diskHash: row.content_hash ?? null,
+          size: file.stat.size,
+          mtime: file.stat.mtime,
           at: new Date().toISOString(),
         };
         continue;
@@ -253,6 +281,8 @@ export async function push(options: EngineOptions): Promise<PassResult> {
       state[file.path] = {
         layerHash: row.content_hash ?? null,
         diskHash: row.content_hash ?? null,
+        size: file.stat.size,
+        mtime: file.stat.mtime,
         at: new Date().toISOString(),
       };
     } catch (error) {
@@ -311,6 +341,17 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     onProgress(done, rows.length, row.source_ref);
 
     if (isExcluded(row.source_ref)) continue;
+
+    // Attachment policy, applied before any network call: a file we are not
+    // going to keep should cost nothing at all, not a download we then discard.
+    if (row.kind === "attachment") {
+      const policy = options.attachments ?? "all";
+      const limit = options.attachmentLimitBytes ?? Number.POSITIVE_INFINITY;
+      if (policy === "none" || (policy === "under-limit" && (row.byte_size ?? 0) > limit)) {
+        result.skipped += 1;
+        continue;
+      }
+    }
 
     const path = normalizePath(row.source_ref);
     const existing = app.vault.getAbstractFileByPath(path);

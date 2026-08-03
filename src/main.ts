@@ -128,6 +128,8 @@ export default class NucleusSyncPlugin extends Plugin {
       vaultName: this.settings.vaultName,
       state: this.settings.state,
       saveState: this.saveState,
+      attachments: this.settings.attachments,
+      attachmentLimitBytes: this.settings.attachmentLimitBytes,
       log: (line: string) => {
         console.warn("[nucleus]", line);
         report?.(line);
@@ -270,6 +272,7 @@ export default class NucleusSyncPlugin extends Plugin {
     if (pushed?.uploaded) bits.push(`${pushed.uploaded} up`);
     if (pulled?.deletedLocally) bits.push(`${pulled.deletedLocally} removed here`);
     if (pushed?.tombstoned) bits.push(`${pushed.tombstoned} deleted`);
+    if (pulled?.skipped) bits.push(`${pulled.skipped} big files skipped`);
 
     this.setStatus(bits.length ? `Nucleus: ${bits.join(", ")}` : "Nucleus: up to date");
 

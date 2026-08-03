@@ -82,6 +82,17 @@ export interface SyncRecord {
   diskHash: string | null;
   /** ISO-8601 timestamp of that reconciliation. Informational. */
   at?: string;
+  /**
+   * The file's size and modified time at that reconciliation.
+   *
+   * These are what let an unchanged file be skipped WITHOUT opening it. Before
+   * they existed, every pass read and hashed the entire vault just to discover
+   * that nothing had changed — minutes of disk on a 1.4 GB vault, worse on a
+   * phone, and paid on every single sync. Optional, so records written by
+   * earlier versions still load; a missing value just falls back to reading.
+   */
+  size?: number;
+  mtime?: number;
 }
 
 /** Per-file sync state, keyed by vault-relative path. */
