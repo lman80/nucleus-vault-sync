@@ -611,8 +611,22 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   }
 
   if (needsBody.length > 0) {
-    onProgress(0, 1, `fetching ${needsBody.length} note${needsBody.length === 1 ? "" : "s"}…`);
-    const bodies = await client.getDocumentBodies(needsBody);
+    // Your notes before plugin code. All 447 notes weigh 2.5 MB between them;
+    // the config text is 30 MB of plugin JavaScript. Fetching them in one
+    // undifferentiated lump means waiting for a plugin bundle before a single
+    // note of your own arrives.
+    const byId = new Map(rows.map((r) => [r.id, r]));
+    needsBody.sort((a, b) => {
+      const aConfig = isConfigPath(app, byId.get(a)?.source_ref ?? "") ? 1 : 0;
+      const bConfig = isConfigPath(app, byId.get(b)?.source_ref ?? "") ? 1 : 0;
+      if (aConfig !== bConfig) return aConfig - bConfig;
+      return (byId.get(a)?.byte_size ?? 0) - (byId.get(b)?.byte_size ?? 0);
+    });
+
+    onProgress(0, 1, `fetching ${needsBody.length} files…`);
+    const bodies = await client.getDocumentBodies(needsBody, (fetched, total) => {
+      onProgress(0, 1, `fetching text — ${fetched} of ${total}`);
+    });
     for (const row of rows) {
       const body = bodies.get(row.id);
       if (body) {

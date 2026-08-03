@@ -500,7 +500,10 @@ export class NucleusClient {
    * Batched by id rather than fetched one at a time: 400 individual round trips
    * on a 260 ms link is nearly two minutes of latency and nothing else.
    */
-  async getDocumentBodies(ids: string[]): Promise<Map<string, DocumentRow>> {
+  async getDocumentBodies(
+    ids: string[],
+    onProgress?: (done: number, total: number) => void,
+  ): Promise<Map<string, DocumentRow>> {
     const out = new Map<string, DocumentRow>();
     const BATCH = 40;
     for (let i = 0; i < ids.length; i += BATCH) {
@@ -509,6 +512,10 @@ export class NucleusClient {
         `/rest/v1/documents?select=id,raw,body,frontmatter&id=in.(${slice.join(",")})`,
       );
       for (const row of this.rows<DocumentRow>(res)) out.set(row.id, row);
+      // Report as we go. This step looked frozen because it is not one request
+      // but fifteen, and for this vault it moves 32 MB — 30 of which is plugin
+      // JavaScript, not notes.
+      onProgress?.(Math.min(i + BATCH, ids.length), ids.length);
     }
     return out;
   }
