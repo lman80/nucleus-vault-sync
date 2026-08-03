@@ -308,7 +308,7 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   const result = emptyResult();
 
   const files = vaultFiles(app);
-  const configOpts = options.config ?? { enabled: false, includeWorkspace: false };
+  const configOpts = options.config ?? { enabled: false, includeCaches: false };
   onProgress(0, 1, "checking what has changed here…");
   const configPaths = await listConfigFiles(app, configOpts);
   const remote = await client.listDocumentsSlim();
@@ -509,7 +509,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
         : row.source_ref,
     );
 
-    const configOpts = options.config ?? { enabled: false, includeWorkspace: false };
+    const configOpts = options.config ?? { enabled: false, includeCaches: false };
 
     // Config files take a completely different route: the vault API cannot see
     // or write inside `.obsidian`, so they are read, hashed and written through

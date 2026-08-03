@@ -21,13 +21,13 @@ import { mayWriteConfigPath, OWN_DATA_FILE } from "./core/config-paths";
 
 const app = ".obsidian";
 
-const on = { enabled: true, includeWorkspace: false };
-const withWorkspace = { enabled: true, includeWorkspace: true };
-const off = { enabled: false, includeWorkspace: false };
+const on = { enabled: true, includeCaches: false };
+const withCaches = { enabled: true, includeCaches: true };
+const off = { enabled: false, includeCaches: false };
 
 test("our own data.json is never written, even on the way down", () => {
   assert.equal(mayWriteConfigPath(app, `.obsidian/${OWN_DATA_FILE}`, on), false);
-  assert.equal(mayWriteConfigPath(app, `.obsidian/${OWN_DATA_FILE}`, withWorkspace), false);
+  assert.equal(mayWriteConfigPath(app, `.obsidian/${OWN_DATA_FILE}`, withCaches), false);
 });
 
 test("another plugin's data.json IS synced — only ours is special", () => {
@@ -42,14 +42,21 @@ test("plugin code, themes and snippets are synced", () => {
   assert.equal(mayWriteConfigPath(app, ".obsidian/hotkeys.json", on), true);
 });
 
-test("workspace layout is excluded unless asked for", () => {
-  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace.json", on), false);
-  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace-mobile.json", on), false);
-  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace.json", withWorkspace), true);
+test("workspace layout IS synced — everything means everything", () => {
+  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace.json", on), true);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace-mobile.json", on), true);
 });
 
-test("regenerable plugin caches are skipped", () => {
+test("which plugins are enabled, and their settings, are synced", () => {
+  assert.equal(mayWriteConfigPath(app, ".obsidian/community-plugins.json", on), true);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/core-plugins.json", on), true);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/appearance.json", on), true);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/graph.json", on), true);
+});
+
+test("constantly-rewritten caches are skipped by default, included on request", () => {
   assert.equal(mayWriteConfigPath(app, ".obsidian/plugins/smart-connections/.smart-env/x.ajson", on), false);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/plugins/smart-connections/.smart-env/x.ajson", withCaches), true);
 });
 
 test("nothing under the config dir is written when the feature is off", () => {

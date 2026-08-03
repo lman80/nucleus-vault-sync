@@ -54,8 +54,8 @@ export interface NucleusSettings {
   attachmentLimitBytes: number;
   /** Carry `.obsidian` too — plugins, themes, snippets, hotkeys. */
   syncConfig: boolean;
-  /** Include which panes are open. Per-device by nature; off by default. */
-  syncWorkspaceLayout: boolean;
+  /** Include plugin caches that rewrite themselves constantly. */
+  syncPluginCaches: boolean;
 }
 
 export const DEFAULT_SETTINGS: NucleusSettings = {
@@ -76,7 +76,7 @@ export const DEFAULT_SETTINGS: NucleusSettings = {
   attachments: "all",
   attachmentLimitBytes: 25 * 1024 * 1024,
   syncConfig: true,
-  syncWorkspaceLayout: false,
+  syncPluginCaches: false,
 };
 
 export class NucleusSettingTab extends PluginSettingTab {
@@ -229,11 +229,12 @@ export class NucleusSettingTab extends PluginSettingTab {
     containerEl.createEl("h3", { text: "App settings and plugins" });
 
     new Setting(containerEl)
-      .setName("Sync plugins, themes and hotkeys")
+      .setName("Sync everything else in the vault")
       .setDesc(
-        "Carries the .obsidian folder as well as your notes, so a new device comes up with the " +
-          "same plugins and the same setup. Your key and this device's sync record are never " +
-          "sent — they have to differ per device.",
+        "Which plugins are enabled, every plugin's own settings, themes, snippets, hotkeys, " +
+          "appearance, graph settings, workspace layout — the whole .obsidian folder. The only " +
+          "thing never sent is this plugin's own settings file, because it holds your key and " +
+          "this device's sync record, which has to differ per device.",
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.syncConfig).onChange(async (v) => {
@@ -245,11 +246,14 @@ export class NucleusSettingTab extends PluginSettingTab {
 
     if (this.plugin.settings.syncConfig) {
       new Setting(containerEl)
-        .setName("Also sync which panes are open")
-        .setDesc("Off by default — a Mac's window layout is rarely what you want on a phone.")
+        .setName("Also sync plugin caches")
+        .setDesc(
+          "Off by default. Some plugins keep a cache they rewrite constantly, which would keep " +
+            "sync permanently busy. They rebuild themselves on each device anyway.",
+        )
         .addToggle((t) =>
-          t.setValue(this.plugin.settings.syncWorkspaceLayout).onChange(async (v) => {
-            this.plugin.settings.syncWorkspaceLayout = v;
+          t.setValue(this.plugin.settings.syncPluginCaches).onChange(async (v) => {
+            this.plugin.settings.syncPluginCaches = v;
             await this.plugin.saveSettings();
           }),
         );

@@ -151,7 +151,7 @@ export default class NucleusSyncPlugin extends Plugin {
       attachmentLimitBytes: this.settings.attachmentLimitBytes,
       config: {
         enabled: this.settings.syncConfig,
-        includeWorkspace: this.settings.syncWorkspaceLayout,
+        includeCaches: this.settings.syncPluginCaches,
       },
       log: (line: string) => {
         console.warn("[nucleus]", line);

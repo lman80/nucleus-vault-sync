@@ -11,17 +11,20 @@
 /** This plugin's own settings file, relative to the config directory. */
 export const OWN_DATA_FILE = "plugins/nucleus-vault-sync/data.json";
 
-/** Which panes are open. Per-device by nature. */
-const WORKSPACE_FILES = ["workspace.json", "workspace-mobile.json"];
-
-/** Caches a plugin rebuilds by itself — large, machine-specific, pointless to move. */
+/**
+ * Caches that rewrite themselves continuously.
+ *
+ * Excluded by default for one functional reason, not tidiness: a vector cache
+ * that changes every time its plugin runs would keep the sync permanently busy
+ * and never let it settle. Everything else in the config directory travels.
+ */
 const CACHE_DIRS = ["plugins/smart-connections/.smart-env", ".smart-env"];
 
 export interface ConfigSyncOptions {
   /** Sync the config directory at all. */
   enabled: boolean;
-  /** Include the per-device window layout. */
-  includeWorkspace: boolean;
+  /** Include plugin caches that rewrite themselves constantly. */
+  includeCaches: boolean;
 }
 
 /**
@@ -33,9 +36,18 @@ export interface ConfigSyncOptions {
  * would break conflict detection on every device at once.
  */
 export function isExcludedConfigPath(relative: string, options: ConfigSyncOptions): boolean {
+  // The ONE file that cannot travel. Everything else in `.obsidian` does —
+  // which plugins are enabled, every plugin's own settings, themes, snippets,
+  // hotkeys, appearance, graph settings, and the workspace layout.
+  //
+  // This one is not a preference. It holds the API key AND this device's sync
+  // record, and that record is *supposed* to differ per device: it is the only
+  // thing that distinguishes "changed here" from "changed there". Copying it
+  // between devices would break conflict detection on all of them at once.
   if (relative === OWN_DATA_FILE) return true;
-  if (!options.includeWorkspace && WORKSPACE_FILES.includes(relative)) return true;
-  if (CACHE_DIRS.some((d) => relative === d || relative.startsWith(`${d}/`))) return true;
+  if (!options.includeCaches && CACHE_DIRS.some((d) => relative === d || relative.startsWith(`${d}/`))) {
+    return true;
+  }
   return false;
 }
 
