@@ -25,7 +25,7 @@
 import { Notice, Plugin, TFile, debounce } from "obsidian";
 
 import { NucleusClient } from "./client";
-import { pull, push, syncBothWays, setAside, isExcluded, type PassResult } from "./engine";
+import { pull, push, syncBothWays, setAside, verifyAndRepair, isExcluded, type PassResult } from "./engine";
 import { OnboardingModal, SET_ASIDE_FOLDER, type MergeChoice, type Situation } from "./onboarding";
 import { DEFAULT_SETTINGS, NucleusSettingTab, type NucleusSettings } from "./settings";
 
@@ -56,6 +56,11 @@ export default class NucleusSyncPlugin extends Plugin {
       id: "upload-to-nucleus",
       name: "Upload everything to Nucleus (do not download)",
       callback: () => void this.runOneWay("push"),
+    });
+    this.addCommand({
+      id: "verify-and-repair",
+      name: "Check for damaged files and repair (use after a sync was interrupted)",
+      callback: () => void this.repair(),
     });
     this.addCommand({ id: "open-setup", name: "Open setup", callback: () => this.openOnboarding() });
 
@@ -237,6 +242,30 @@ export default class NucleusSyncPlugin extends Plugin {
       this.syncing = false;
       this.applyingRemote = false;
     }
+  }
+
+  /** Find and remove half-written files, then sync so they come back whole. */
+  private async repair(): Promise<void> {
+    if (!this.guard()) return;
+    this.syncing = true;
+    this.applyingRemote = true;
+    this.setStatus("Nucleus: checking…");
+    try {
+      const result = await verifyAndRepair(this.engineOptions());
+      const damaged = result.corrupt.length;
+      new Notice(
+        damaged
+          ? `Checked ${result.checked} files. Removed ${damaged} incomplete one(s); syncing now to fetch them again.`
+          : `Checked ${result.checked} files — all complete. ${result.missing.length} still to download.`,
+        8000,
+      );
+    } catch (error) {
+      new Notice(`Nucleus: ${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      this.syncing = false;
+      this.applyingRemote = false;
+    }
+    await this.syncNow();
   }
 
   async syncNow({ quiet = false } = {}): Promise<void> {

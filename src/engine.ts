@@ -222,6 +222,34 @@ export async function setAside(
   return { moved, failed };
 }
 
+
+/**
+ * Check that what arrived is what was asked for, before it touches the vault.
+ *
+ * An interrupted download leaves a truncated file, and a truncated file has no
+ * sync record — so the next pass sees "the layer changed AND the disk changed"
+ * and dutifully makes a conflict copy of a corrupt file. The user stops a sync
+ * on their phone once and ends up with junk twins through their vault.
+ *
+ * Verifying here turns that into a clean retry: bad bytes are never written, so
+ * the file simply is not there next time and gets fetched again.
+ */
+async function verifiedBytes(
+  bytes: ArrayBuffer,
+  expectedHash: string | null | undefined,
+  path: string,
+): Promise<ArrayBuffer> {
+  if (!expectedHash) return bytes;
+  const actual = await sha256(bytes);
+  if (actual !== expectedHash) {
+    throw new Error(
+      `incomplete download for ${path} (got ${bytes.byteLength} bytes, checksum did not match) — ` +
+        `it will be fetched again on the next sync`,
+    );
+  }
+  return bytes;
+}
+
 /**
  * Push: make the layer match the vault.
  *
@@ -460,7 +488,12 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
         // a plugin folder where Obsidian may try to load it. Newest wins here,
         // and the file is small enough that nothing meaningful is lost.
         if (row.kind === "attachment" && row.storage_path) {
-          await writeConfigBinary(app, row.source_ref, await client.getObject(row.storage_path));
+          const fetched = await client.getObject(row.storage_path);
+          await writeConfigBinary(
+            app,
+            row.source_ref,
+            await verifiedBytes(fetched, row.content_hash, row.source_ref),
+          );
         } else {
           await writeConfigText(app, row.source_ref, row.raw ?? row.body ?? "");
         }
@@ -534,7 +567,11 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
 
       const bytes =
         row.kind === "attachment" && row.storage_path
-          ? await client.getObject(row.storage_path)
+          ? await verifiedBytes(
+              await client.getObject(row.storage_path),
+              row.content_hash,
+              row.source_ref,
+            )
           : new TextEncoder().encode(renderNote(row)).buffer;
 
       const target = action === "conflict" ? normalizePath(conflictName(row.source_ref, new Date().toISOString())) : path;
@@ -582,6 +619,80 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
 
   await options.saveState(state);
   return result;
+}
+
+
+/**
+ * Check every local file against the layer and fix anything that does not match.
+ *
+ * For the case this was written for: a sync stopped part-way. Some files are
+ * complete, some are truncated, and the sync record says nothing about either.
+ * A normal pass would treat the truncated ones as edits and make conflict
+ * copies; this one recognises them as damage and simply removes them, so the
+ * next pass fetches them again.
+ *
+ * Nothing is deleted unless the layer holds a copy to replace it with — a file
+ * the layer has never heard of is yours, and is left alone.
+ */
+export async function verifyAndRepair(options: EngineOptions): Promise<{
+  checked: number;
+  corrupt: string[];
+  missing: string[];
+}> {
+  const { app, client, state, onProgress = () => {} } = options;
+  const rows = await client.listDocumentsFull();
+  const corrupt: string[] = [];
+  const missing: string[] = [];
+  let checked = 0;
+
+  for (const row of rows) {
+    checked += 1;
+    onProgress(checked, rows.length, row.source_ref);
+    if (row.deleted_at || !row.content_hash) continue;
+    if (isConfigPath(app, row.source_ref)) continue;
+
+    const existing = app.vault.getAbstractFileByPath(normalizePath(row.source_ref));
+    const file = existing instanceof TFileClass ? existing : null;
+    if (!file) {
+      missing.push(row.source_ref);
+      continue;
+    }
+
+    let onDisk: string;
+    try {
+      onDisk = row.kind === "attachment"
+        ? await sha256(await app.vault.readBinary(file))
+        : await sha256(await app.vault.read(file));
+    } catch {
+      corrupt.push(row.source_ref);
+      continue;
+    }
+
+    if (onDisk === row.content_hash) {
+      // Whole and correct — record the agreement so the next pass skips it
+      // cheaply instead of hashing it again.
+      state[row.source_ref] = {
+        layerHash: row.content_hash,
+        diskHash: onDisk,
+        size: file.stat.size,
+        mtime: file.stat.mtime,
+        at: new Date().toISOString(),
+      };
+      continue;
+    }
+
+    // Differs. If we have never recorded these two agreeing, this is almost
+    // certainly a half-written file from an interrupted run rather than an
+    // edit — an edit would have been made in Obsidian, on a file that had
+    // finished downloading, and would therefore have a record.
+    if (!state[row.source_ref]) {
+      await app.fileManager.trashFile(file);
+      corrupt.push(row.source_ref);
+    }
+  }
+
+  await options.saveState(state);
+  return { checked, corrupt, missing };
 }
 
 /** One full pass: pull first so local edits are never sent into a conflict, then push. */
