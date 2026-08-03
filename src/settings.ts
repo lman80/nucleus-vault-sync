@@ -100,6 +100,18 @@ export class NucleusSettingTab extends PluginSettingTab {
 
     // What happened last, in full. The status bar has room for a few words;
     // this is where the actual reason lives.
+    // On a phone this screen is the most reliable place to look, so it should
+    // say what is happening NOW, not only what happened last.
+    const live = this.plugin.currentStatus();
+    if (live) {
+      const box = containerEl.createEl("div", { cls: "nucleus-secondary" });
+      box.createEl("p", { text: "Right now" });
+      box.createEl("pre", { text: live, cls: "nucleus-log" });
+      new Setting(box).addButton((b) =>
+        b.setButtonText("Refresh").onClick(() => this.display()),
+      );
+    }
+
     const last = this.plugin.lastError ?? this.plugin.lastReport;
     if (last) {
       const box = containerEl.createEl("div", {

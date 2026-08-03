@@ -22,7 +22,7 @@
  * resumable and starts by asking both sides what they have.
  */
 
-import { Notice, Plugin, TFile, debounce } from "obsidian";
+import { Notice, Platform, Plugin, TFile, debounce } from "obsidian";
 
 import { NucleusClient } from "./client";
 import { pull, push, syncBothWays, setAside, replaceLocal, verifyAndRepair, isExcluded, type PassResult } from "./engine";
@@ -36,6 +36,15 @@ export default class NucleusSyncPlugin extends Plugin {
   /** True while WE are writing, so our own writes do not trigger another pass. */
   private applyingRemote = false;
   private statusEl: HTMLElement | null = null;
+  /**
+   * A live notice, for phones.
+   *
+   * `addStatusBarItem` does nothing on mobile — there is no status bar — so
+   * every progress line built so far was written somewhere the owner could not
+   * see it. On a phone the same text goes into a notice that stays up and is
+   * rewritten as the sync moves, then closes when it finishes.
+   */
+  private liveNotice: Notice | null = null;
   /** Newest change we have already reacted to, so a poll only acts on news. */
   private lastSeenChange: string | null = null;
   /** What went wrong last, kept so it can be shown rather than only logged. */
@@ -57,7 +66,12 @@ export default class NucleusSyncPlugin extends Plugin {
     this.statusEl.onClickEvent(() => new Notice(this.summary(), 15000));
     this.setStatus(this.configured ? "Nucleus: ready" : "Nucleus: not set up");
 
-    this.addRibbonIcon("refresh-cw", "Sync with Nucleus", () => void this.syncNow());
+    this.addRibbonIcon("refresh-cw", "Sync with Nucleus", () => {
+      // On a phone this is the only handle there is, so tapping it while a sync
+      // is running should say how it is going rather than do nothing.
+      if (this.syncing) new Notice(this.summary(), 10000);
+      else void this.syncNow();
+    });
 
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => void this.syncNow() });
     this.addCommand({
@@ -74,6 +88,11 @@ export default class NucleusSyncPlugin extends Plugin {
       id: "verify-and-repair",
       name: "Check for damaged files and repair (use after a sync was interrupted)",
       callback: () => void this.repair(),
+    });
+    this.addCommand({
+      id: "sync-status",
+      name: "How is sync doing?",
+      callback: () => new Notice(this.summary(), 15000),
     });
     this.addCommand({ id: "open-setup", name: "Open setup", callback: () => this.openOnboarding() });
 
@@ -101,7 +120,12 @@ export default class NucleusSyncPlugin extends Plugin {
    * answer — it says nothing about whether the vault is finished, when it last
    * worked, or what to do next.
    */
-  private summary(): string {
+  /** What is happening this second, or null when idle. For the settings screen. */
+  currentStatus(): string | null {
+    return this.syncing ? (this.statusEl?.getText() || "Syncing…") : null;
+  }
+
+  summary(): string {
     if (!this.configured) return "Nucleus is not set up yet. Open Settings → Nucleus Vault Sync.";
 
     const when = this.lastSyncAt ? `Last synced ${this.ago(this.lastSyncAt)}.` : "Has not synced yet.";
@@ -138,6 +162,23 @@ export default class NucleusSyncPlugin extends Plugin {
 
   private setStatus(text: string): void {
     this.statusEl?.setText(text);
+
+    if (!Platform.isMobileApp) return;
+
+    // Only hold a notice open while something is actually happening; an idle
+    // "up to date" banner that never goes away is its own annoyance.
+    const busy = this.syncing;
+    if (!busy) {
+      this.liveNotice?.hide();
+      this.liveNotice = null;
+      return;
+    }
+    if (!this.liveNotice) {
+      // 0 = stays until hidden.
+      this.liveNotice = new Notice(text, 0);
+    } else {
+      this.liveNotice.setMessage(text);
+    }
   }
 
   makeClient(
@@ -402,6 +443,8 @@ export default class NucleusSyncPlugin extends Plugin {
     } finally {
       this.syncing = false;
       this.applyingRemote = false;
+      this.liveNotice?.hide();
+      this.liveNotice = null;
     }
   }
 
