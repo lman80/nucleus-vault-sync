@@ -243,30 +243,33 @@ export default class NucleusSyncPlugin extends Plugin {
           let movedAside = 0;
 
           if (situation === "restore") {
-            pulled = await pull(options);
+            // Only the part that makes the vault usable. The attachments —
+            // which for this vault are 1.4 GB of video and none of the urgency —
+            // continue after the dialog closes. Blocking setup on them meant
+            // waiting twenty minutes before opening a single note, which is not
+            // what "notes first" was supposed to mean.
+            pulled = await pull({ ...options, only: "text" });
+            this.finishAttachmentsInBackground();
           } else if (situation === "upload") {
             pushed = await push(options);
-          } else if (mergeChoice === "set-aside") {
-            // Move what is here out of the way FIRST, so the layer's copy lands
-            // on an empty tree and no file ever has to be reconciled. After the
-            // move the vault is effectively empty, so this becomes a plain
-            // restore — then the set-aside notes are pushed up as new files.
-            report(`Moving ${SET_ASIDE_FOLDER}…`);
-            const aside = await setAside(this.app, SET_ASIDE_FOLDER, report);
-            movedAside = aside.moved;
-            pulled = await pull(options);
-            pushed = await push(options);
           } else if (mergeChoice === "replace") {
-            // Deliberately clears this device's sync record too: the files it
-            // described are gone, and a record pointing at absent files would
-            // make the next pass think they had been deleted on purpose.
             report("Clearing this vault…");
             const cleared = await replaceLocal(this.app, report);
             movedAside = 0;
             this.settings.state = {};
             await this.saveSettings();
-            report(`Removed ${cleared.removed}. Downloading…`);
-            pulled = await pull(this.engineOptions(report));
+            report(`Removed ${cleared.removed}. Downloading your notes…`);
+            pulled = await pull({ ...this.engineOptions(report), only: "text" });
+            this.finishAttachmentsInBackground();
+          } else if (mergeChoice === "set-aside") {
+            // Move what is here out of the way FIRST, so the layer's copy lands
+            // on an empty tree and no file ever has to be reconciled.
+            report(`Moving ${SET_ASIDE_FOLDER}…`);
+            const aside = await setAside(this.app, SET_ASIDE_FOLDER, report);
+            movedAside = aside.moved;
+            pulled = await pull({ ...options, only: "text" });
+            pushed = await push(options);
+            this.finishAttachmentsInBackground();
           } else if (mergeChoice === "upload-mine") {
             // Local wins: send everything up first, so anything that differs is
             // resolved in the vault's favour, then bring down what is missing.
@@ -288,6 +291,10 @@ export default class NucleusSyncPlugin extends Plugin {
           if (pulled?.deletedLocally) parts.push(`${pulled.deletedLocally} removed here`);
           if (pushed?.tombstoned) parts.push(`${pushed.tombstoned} marked deleted`);
           if (!parts.length) parts.push("everything already matched");
+          // Do not claim completeness while the heavy half is still queued.
+          if (situation === "restore" || mergeChoice === "replace" || mergeChoice === "set-aside") {
+            parts.push("attachments continue in the background");
+          }
 
           this.setStatus("Nucleus: ready");
           return {
@@ -300,6 +307,33 @@ export default class NucleusSyncPlugin extends Plugin {
         }
       },
     }).open();
+  }
+
+  /**
+   * Carry on with the attachments once setup has handed the vault over.
+   *
+   * Deliberately not awaited: the point is that the dialog closes and the vault
+   * opens. Failures are reported the same way a background sync's are, and
+   * anything unfinished is simply picked up next time.
+   */
+  private finishAttachmentsInBackground(): void {
+    window.setTimeout(() => {
+      void (async () => {
+        if (this.syncing) return;
+        this.syncing = true;
+        this.applyingRemote = true;
+        try {
+          const result = await pull({ ...this.engineOptions(), only: "attachments" });
+          this.announce(result, null, true);
+        } catch (error) {
+          this.lastError = error instanceof Error ? error.message : String(error);
+          this.setStatus("Nucleus: attachments unfinished — click for why");
+        } finally {
+          this.syncing = false;
+          this.applyingRemote = false;
+        }
+      })();
+    }, 1500);
   }
 
   /** One command, one direction — for when the automatic choice is not what you want. */

@@ -60,6 +60,16 @@ export interface EngineOptions {
   attachmentLimitBytes?: number;
   /** Whether to carry `.obsidian` — plugins, themes, hotkeys — as well. */
   config?: ConfigSyncOptions;
+  /**
+   * Restrict this pass to part of the vault.
+   *
+   * "text" is everything that makes the vault usable — notes, plugins,
+   * settings — and weighs a few megabytes. "attachments" is the rest, which for
+   * a vault with video in it is nearly all the bytes and none of the urgency.
+   * Splitting them is what lets setup hand the vault over in seconds and finish
+   * the heavy half afterwards.
+   */
+  only?: "text" | "attachments";
 }
 
 export interface PassResult {
@@ -571,11 +581,15 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // touched. Attachments follow smallest-first, and a note whose image has not
   // arrived yet still opens fine.
   const isHeavy = (r: DocumentRow) => r.kind === "attachment";
+  const only = options.only;
+  const wanted = fetched.filter((r) =>
+    only === "text" ? !isHeavy(r) : only === "attachments" ? isHeavy(r) : true,
+  );
   const rows = [
-    ...fetched.filter((r) => !isHeavy(r)).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
-    ...fetched.filter(isHeavy).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
+    ...wanted.filter((r) => !isHeavy(r)).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
+    ...wanted.filter(isHeavy).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
   ];
-  const noteCount = fetched.filter((r) => !isHeavy(r)).length;
+  const noteCount = wanted.filter((r) => !isHeavy(r)).length;
   // Work out the short list before fetching any text: only notes whose content
   // differs from what is on disk need their body at all, and on a settled vault
   // that is almost none of them.

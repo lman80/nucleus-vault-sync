@@ -503,8 +503,14 @@ export class OnboardingModal extends Modal {
     try {
       const outcome = await this.cb.onRun(this.surveyed!.situation, this.mergeChoice, report);
       el.empty();
-      el.createEl("h2", { text: "Done" });
+      el.createEl("h2", { text: "Your vault is ready" });
       el.createEl("p", { text: outcome.summary });
+      el.createEl("p", {
+        text:
+          "Attachments — images and video — keep downloading in the background. " +
+          "You can close this and start using your notes now; the status bar at the " +
+          "bottom shows how much is left.",
+      });
 
       if (outcome.conflicts > 0) {
         el.createEl("p", {
