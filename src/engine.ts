@@ -580,7 +580,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // differs from what is on disk need their body at all, and on a settled vault
   // that is almost none of them.
   onProgress(0, 1, "working out what changed…");
-  const needsBody: string[] = [];
+  const needsBody: { id: string; size: number }[] = [];
   for (const row of rows) {
     if (row.deleted_at || row.kind === "attachment") continue;
     const path = normalizePath(row.source_ref);
@@ -606,7 +606,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
       }
     }
     if (decide({ row, onDisk, record: state[row.source_ref] }).action !== "none") {
-      needsBody.push(row.id);
+      needsBody.push({ id: row.id, size: row.byte_size ?? 0 });
     }
   }
 
@@ -617,10 +617,10 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     // note of your own arrives.
     const byId = new Map(rows.map((r) => [r.id, r]));
     needsBody.sort((a, b) => {
-      const aConfig = isConfigPath(app, byId.get(a)?.source_ref ?? "") ? 1 : 0;
-      const bConfig = isConfigPath(app, byId.get(b)?.source_ref ?? "") ? 1 : 0;
+      const aConfig = isConfigPath(app, byId.get(a.id)?.source_ref ?? "") ? 1 : 0;
+      const bConfig = isConfigPath(app, byId.get(b.id)?.source_ref ?? "") ? 1 : 0;
       if (aConfig !== bConfig) return aConfig - bConfig;
-      return (byId.get(a)?.byte_size ?? 0) - (byId.get(b)?.byte_size ?? 0);
+      return a.size - b.size;
     });
 
     onProgress(0, 1, `fetching ${needsBody.length} files…`);

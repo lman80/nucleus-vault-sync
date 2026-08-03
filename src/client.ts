@@ -501,21 +501,43 @@ export class NucleusClient {
    * on a 260 ms link is nearly two minutes of latency and nothing else.
    */
   async getDocumentBodies(
-    ids: string[],
+    items: { id: string; size: number }[],
     onProgress?: (done: number, total: number) => void,
   ): Promise<Map<string, DocumentRow>> {
     const out = new Map<string, DocumentRow>();
-    const BATCH = 40;
-    for (let i = 0; i < ids.length; i += BATCH) {
-      const slice = ids.slice(i, i + BATCH);
+
+    // Batched by SIZE, not by count.
+    //
+    // Forty rows at a time sounds modest until some of those rows are plugin
+    // bundles of several megabytes each — one request then carries tens of
+    // megabytes, crosses Obsidian's base64 bridge on mobile, and blows past
+    // even a 45 second timeout. Observed doing exactly that.
+    //
+    // A byte budget keeps every request small whatever it happens to contain,
+    // and a single row larger than the budget still goes alone rather than
+    // being skipped.
+    const BUDGET = 750_000;
+    const MAX_ROWS = 40;
+
+    let done = 0;
+    for (let i = 0; i < items.length; ) {
+      const slice: string[] = [];
+      let bytes = 0;
+      while (i < items.length && slice.length < MAX_ROWS) {
+        const next = items[i];
+        if (!next) break;
+        if (slice.length > 0 && bytes + next.size > BUDGET) break;
+        slice.push(next.id);
+        bytes += next.size;
+        i += 1;
+      }
+
       const res = await this.rest(
         `/rest/v1/documents?select=id,raw,body,frontmatter&id=in.(${slice.join(",")})`,
       );
       for (const row of this.rows<DocumentRow>(res)) out.set(row.id, row);
-      // Report as we go. This step looked frozen because it is not one request
-      // but fifteen, and for this vault it moves 32 MB — 30 of which is plugin
-      // JavaScript, not notes.
-      onProgress?.(Math.min(i + BATCH, ids.length), ids.length);
+      done += slice.length;
+      onProgress?.(done, items.length);
     }
     return out;
   }
