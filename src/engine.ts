@@ -367,6 +367,26 @@ export async function removeEmptyFolders(
   return removedTotal;
 }
 
+
+/**
+ * The original timestamps for a row, as Obsidian wants them.
+ *
+ * `create` and `modify` both accept `{ ctime, mtime }` and I never passed them,
+ * so every downloaded note took the moment it arrived as its creation date.
+ * For anyone who sorts by "created" — which is most people, and is how this
+ * vault is organised — that silently destroys the ordering of the whole vault
+ * while leaving every note's contents perfect. The data was right and the shelf
+ * it sat on was wrong.
+ */
+function timesFor(row: DocumentRow): { ctime?: number; mtime?: number } {
+  const created = row.file_created_at ? Date.parse(row.file_created_at) : NaN;
+  const modified = row.file_modified_at ? Date.parse(row.file_modified_at) : NaN;
+  const out: { ctime?: number; mtime?: number } = {};
+  if (Number.isFinite(created)) out.ctime = created;
+  if (Number.isFinite(modified)) out.mtime = modified;
+  return out;
+}
+
 /**
  * Push: make the layer match the vault.
  *
@@ -715,9 +735,10 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
             app,
             row.source_ref,
             await verifiedBytes(fetched, row.content_hash, row.source_ref),
+            timesFor(row),
           );
         } else {
-          await writeConfigText(app, row.source_ref, row.raw ?? row.body ?? "");
+          await writeConfigText(app, row.source_ref, row.raw ?? row.body ?? "", timesFor(row));
         }
         const after = await statConfigFile(app, row.source_ref);
         state[row.source_ref] = {
@@ -808,13 +829,14 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
       const targetFile = app.vault.getAbstractFileByPath(target);
       const asFile = targetFile instanceof TFileClass ? targetFile : null;
 
+      const times = timesFor(row);
       if (row.kind === "attachment") {
-        if (asFile) await app.vault.modifyBinary(asFile, bytes);
-        else await app.vault.createBinary(target, bytes);
+        if (asFile) await app.vault.modifyBinary(asFile, bytes, times);
+        else await app.vault.createBinary(target, bytes, times);
       } else {
         const text = new TextDecoder().decode(bytes);
-        if (asFile) await app.vault.modify(asFile, text);
-        else await app.vault.create(target, text);
+        if (asFile) await app.vault.modify(asFile, text, times);
+        else await app.vault.create(target, text, times);
       }
 
       if (action === "conflict") {
@@ -921,6 +943,58 @@ export async function verifyAndRepair(options: EngineOptions): Promise<{
 
   await options.saveState(state);
   return { checked, corrupt, missing };
+}
+
+
+/**
+ * Put the original created/modified dates back on files already downloaded.
+ *
+ * Needed because earlier versions wrote every file without them, so a restored
+ * vault came out looking as though every note had been written the day it was
+ * downloaded. Contents were perfect; the dates — which is how this vault is
+ * sorted — were all today.
+ *
+ * Rewrites each file with its own current contents and the correct timestamps,
+ * so nothing is fetched and nothing can be lost: the bytes on disk go back
+ * exactly as they are, only the dates change.
+ */
+export async function repairDates(options: EngineOptions): Promise<{ checked: number; fixed: number }> {
+  const { app, client, onProgress = () => {} } = options;
+  const rows = await client.listDocumentsMeta();
+  let checked = 0;
+  let fixed = 0;
+
+  for (const row of rows) {
+    checked += 1;
+    onProgress(checked, rows.length, row.source_ref);
+    if (row.deleted_at) continue;
+
+    const times = timesFor(row);
+    if (times.ctime === undefined && times.mtime === undefined) continue;
+
+    try {
+      if (isConfigPath(app, row.source_ref)) continue; // config dates do not matter
+      const existing = app.vault.getAbstractFileByPath(normalizePath(row.source_ref));
+      const file = existing instanceof TFileClass ? existing : null;
+      if (!file) continue;
+
+      // Within a second is close enough; rewriting every file to correct a few
+      // milliseconds would be churn for nothing.
+      const closeEnough =
+        times.ctime !== undefined && Math.abs(file.stat.ctime - times.ctime) < 1000;
+      if (closeEnough) continue;
+
+      if (row.kind === "attachment") {
+        await app.vault.modifyBinary(file, await app.vault.readBinary(file), times);
+      } else {
+        await app.vault.modify(file, await app.vault.read(file), times);
+      }
+      fixed += 1;
+    } catch (error) {
+      options.log?.(`could not fix dates on ${row.source_ref}: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+  return { checked, fixed };
 }
 
 /** One full pass: pull first so local edits are never sent into a conflict, then push. */

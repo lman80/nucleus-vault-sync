@@ -142,14 +142,24 @@ export async function ensureConfigFolders(app: App, path: string): Promise<void>
   }
 }
 
-export async function writeConfigText(app: App, path: string, text: string): Promise<void> {
+export async function writeConfigText(
+  app: App,
+  path: string,
+  text: string,
+  times?: { ctime?: number; mtime?: number },
+): Promise<void> {
   await ensureConfigFolders(app, path);
-  await app.vault.adapter.write(normalizePath(path), text);
+  await app.vault.adapter.write(normalizePath(path), text, times);
 }
 
-export async function writeConfigBinary(app: App, path: string, bytes: ArrayBuffer): Promise<void> {
+export async function writeConfigBinary(
+  app: App,
+  path: string,
+  bytes: ArrayBuffer,
+  times?: { ctime?: number; mtime?: number },
+): Promise<void> {
   await ensureConfigFolders(app, path);
-  await app.vault.adapter.writeBinary(normalizePath(path), bytes);
+  await app.vault.adapter.writeBinary(normalizePath(path), bytes, times);
 }
 
 export async function removeConfigFile(app: App, path: string): Promise<void> {

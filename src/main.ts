@@ -25,7 +25,7 @@
 import { Notice, Platform, Plugin, TFile, debounce } from "obsidian";
 
 import { NucleusClient } from "./client";
-import { pull, push, syncBothWays, setAside, replaceLocal, verifyAndRepair, isExcluded, type PassResult } from "./engine";
+import { pull, push, syncBothWays, setAside, replaceLocal, verifyAndRepair, repairDates, isExcluded, type PassResult } from "./engine";
 import { OnboardingModal, SET_ASIDE_FOLDER, type MergeChoice, type Situation } from "./onboarding";
 import { DEFAULT_SETTINGS, NucleusSettingTab, type NucleusSettings } from "./settings";
 
@@ -88,6 +88,11 @@ export default class NucleusSyncPlugin extends Plugin {
       id: "verify-and-repair",
       name: "Check for damaged files and repair (use after a sync was interrupted)",
       callback: () => void this.repair(),
+    });
+    this.addCommand({
+      id: "repair-dates",
+      name: "Restore original created and modified dates",
+      callback: () => void this.fixDates(),
     });
     this.addCommand({
       id: "sync-status",
@@ -392,6 +397,29 @@ export default class NucleusSyncPlugin extends Plugin {
     } finally {
       this.syncing = false;
       this.applyingRemote = false;
+    }
+  }
+
+  /** Put the original file dates back, for vaults downloaded before 0.12. */
+  private async fixDates(): Promise<void> {
+    if (!this.guard()) return;
+    this.syncing = true;
+    this.applyingRemote = true;
+    this.setStatus("Nucleus: restoring dates…");
+    try {
+      const result = await repairDates(this.engineOptions());
+      new Notice(
+        result.fixed
+          ? `Restored the original dates on ${result.fixed} file(s), out of ${result.checked} checked.`
+          : `Checked ${result.checked} files — dates were already correct.`,
+        10000,
+      );
+    } catch (error) {
+      new Notice(`Nucleus: ${error instanceof Error ? error.message : String(error)}`, 12000);
+    } finally {
+      this.syncing = false;
+      this.applyingRemote = false;
+      this.setStatus("Nucleus: ready");
     }
   }
 
