@@ -390,6 +390,34 @@ export class NucleusClient {
   /** Every row for this vault, reduced to what planning a pass needs. Slim on
    *  purpose: a full listing of a 1.4 GB vault would put every note's text in
    *  memory at once, which is exactly what an iPhone cannot afford. */
+  /**
+   * Which vaults this Nucleus already holds, and how big each one is.
+   *
+   * Deliberately NOT filtered by the configured vault name — this is what setup
+   * calls *before* a vault has been chosen, so the user can pick from a list
+   * instead of typing a name that has to match exactly across devices.
+   * Requiring that exact string was a design mistake: invisible, easy to miss
+   * by a space or a capital, and the failure mode looks like "sync does
+   * nothing" rather than like a typo.
+   */
+  async listVaults(): Promise<{ name: string; files: number }[]> {
+    const counts = new Map<string, number>();
+    for (let offset = 0; ; offset += PAGE) {
+      const res = await this.rest(
+        `/rest/v1/documents?select=vault,deleted_at&order=vault.asc&limit=${PAGE}&offset=${offset}`,
+      );
+      const page = this.rows<{ vault: string; deleted_at: string | null }>(res);
+      for (const row of page) {
+        if (row.deleted_at) continue;
+        counts.set(row.vault, (counts.get(row.vault) ?? 0) + 1);
+      }
+      if (page.length < PAGE) break;
+    }
+    return [...counts.entries()]
+      .map(([name, files]) => ({ name, files }))
+      .sort((a, b) => b.files - a.files);
+  }
+
   async listDocumentsSlim(): Promise<DocRowSlim[]> {
     return this.listPaged<DocRowSlim>("id,source_ref,kind,content_hash,storage_path,deleted_at");
   }

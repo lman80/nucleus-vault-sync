@@ -116,6 +116,7 @@ export class OnboardingModal extends Modal {
   private key: string;
   private vaultName: string;
   private surveyed: Survey | null = null;
+  private vaults: { name: string; files: number }[] = [];
   private busy = false;
 
   constructor(app: App, private cb: WizardCallbacks) {
@@ -164,10 +165,6 @@ export class OnboardingModal extends Modal {
         t.inputEl.type = "password";
       });
 
-    new Setting(el)
-      .setName("Vault name")
-      .setDesc("Which vault this is, inside your Nucleus. Must match on every device that syncs the same notes.")
-      .addText((t) => t.setValue(this.vaultName).onChange((v) => (this.vaultName = v.trim())));
 
     const status = el.createEl("p", { cls: "nucleus-status" });
 
@@ -177,8 +174,8 @@ export class OnboardingModal extends Modal {
         .setCta()
         .onClick(async () => {
           if (this.busy) return;
-          if (!this.url || !this.key || !this.vaultName) {
-            status.setText("Fill in all three boxes first.");
+          if (!this.url || !this.key) {
+            status.setText("Fill in both boxes first.");
             return;
           }
           this.busy = true;
@@ -189,9 +186,9 @@ export class OnboardingModal extends Modal {
               status.setText(test.message);
               return;
             }
-            status.setText("Connected. Looking at what is on each side…");
-            this.surveyed = await survey(this.app, this.cb.makeClient(this.url, this.key, this.vaultName));
-            this.renderConfirm();
+            status.setText("Connected. Looking at what is already in your Nucleus…");
+            this.vaults = await this.cb.makeClient(this.url, this.key, "").listVaults();
+            this.renderPickVault();
           } catch (error) {
             status.setText(error instanceof Error ? error.message : String(error));
           } finally {
@@ -201,7 +198,82 @@ export class OnboardingModal extends Modal {
     );
   }
 
-  /** Screen 2 — what is about to happen, before it happens. */
+
+  /**
+   * Screen 2 — which vault, chosen from what is actually there.
+   *
+   * The first version asked the user to TYPE a vault name and warned that it
+   * had to match on every device. That was a bad design: the requirement is
+   * invisible, a stray space or capital breaks it, and the symptom is "sync
+   * does nothing" rather than anything that points at a typo. Showing the
+   * list removes the requirement instead of explaining it.
+   */
+  private renderPickVault(): void {
+    const el = this.reset();
+    el.createEl("h2", { text: "Which notes should this vault hold?" });
+
+    const folder = this.app.vault.getName();
+
+    if (this.vaults.length === 0) {
+      el.createEl("p", {
+        text: "Your Nucleus has no vaults in it yet, so this will start a new one.",
+      });
+      let proposed = folder;
+      new Setting(el)
+        .setName("Call it")
+        .setDesc("You can change this later. It is only a label inside your Nucleus.")
+        .addText((t) => t.setValue(proposed).onChange((v) => (proposed = v.trim() || folder)));
+      new Setting(el)
+        .addButton((b) => b.setButtonText("Back").onClick(() => this.renderConnect()))
+        .addButton((b) =>
+          b.setButtonText("Continue").setCta().onClick(() => void this.chooseVault(proposed)),
+        );
+      return;
+    }
+
+    el.createEl("p", {
+      text:
+        this.vaults.length === 1
+          ? "Your Nucleus holds one vault. This folder will sync with it."
+          : "Pick the one this folder should sync with.",
+    });
+
+    for (const v of this.vaults) {
+      new Setting(el)
+        .setName(v.name)
+        .setDesc(`${v.files} file${v.files === 1 ? "" : "s"}`)
+        .addButton((b) =>
+          b
+            .setButtonText("Use this")
+            .setCta()
+            .onClick(() => void this.chooseVault(v.name)),
+        );
+    }
+
+    new Setting(el)
+      .setName("Something else")
+      .setDesc("Start a separate vault in your Nucleus, kept apart from the ones above.")
+      .addButton((b) => b.setButtonText(`Start "${folder}"`).onClick(() => void this.chooseVault(folder)));
+
+    new Setting(el).addButton((b) => b.setButtonText("Back").onClick(() => this.renderConnect()));
+  }
+
+  private async chooseVault(name: string): Promise<void> {
+    this.vaultName = name;
+    const el = this.reset();
+    el.createEl("h2", { text: "Checking…" });
+    el.createEl("p", { text: `Comparing this folder with "${name}".` });
+    try {
+      await this.cb.onConnect(this.url, this.key, this.vaultName);
+      this.surveyed = await survey(this.app, this.cb.makeClient(this.url, this.key, this.vaultName));
+      this.renderConfirm();
+    } catch (error) {
+      el.createEl("p", { text: error instanceof Error ? error.message : String(error) });
+      new Setting(el).addButton((b) => b.setButtonText("Back").onClick(() => this.renderPickVault()));
+    }
+  }
+
+  /** Screen 3 — what is about to happen, before it happens. */
   private renderConfirm(): void {
     if (!this.surveyed) return this.renderConnect();
     const plan = explain(this.surveyed);
@@ -218,7 +290,7 @@ export class OnboardingModal extends Modal {
     }
 
     new Setting(el)
-      .addButton((b) => b.setButtonText("Back").onClick(() => this.renderConnect()))
+      .addButton((b) => b.setButtonText("Back").onClick(() => this.renderPickVault()))
       .addButton((b) =>
         b
           .setButtonText(plan.confirm)

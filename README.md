@@ -6,7 +6,13 @@ An Obsidian plugin that keeps your vault in **a database you own**, on your own 
 
 ## Setting it up
 
-Install the plugin, open Obsidian, and the setup wizard appears. It asks for three things — where your Nucleus is, the key to get in, and which vault this is — then **looks at what is actually on each side** and tells you what it is about to do before doing it.
+Install the plugin, open Obsidian, and the setup wizard appears.
+
+1. **Where your Nucleus is, and the key.** Two boxes.
+2. **Which notes.** It shows you the vaults already in your Nucleus, with a file count each — you pick one. You never type a name, and nothing has to match between devices. (If your Nucleus is empty, it offers to start a new one named after the folder.)
+3. **What it will do.** It compares both sides and says so before doing anything.
+
+The folder can be called whatever you like on each device.
 
 You never have to decide "upload or download". It works that out:
 
