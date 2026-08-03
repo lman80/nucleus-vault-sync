@@ -1,9 +1,9 @@
 {
-	"id": "nucleus-vault-sync",
-	"name": "Nucleus Vault Sync",
-	"version": "0.1.0",
-	"minAppVersion": "1.6.6",
-	"description": "Syncs this vault with your own self-hosted Nucleus data layer, on desktop and mobile.",
-	"author": "Ashton Miller",
-	"isDesktopOnly": false
+  "id": "nucleus-vault-sync",
+  "name": "Nucleus Vault Sync",
+  "version": "0.1.1",
+  "minAppVersion": "1.6.6",
+  "description": "Syncs this vault with your own self-hosted Nucleus data layer, on desktop and mobile.",
+  "author": "Ashton Miller",
+  "isDesktopOnly": false
 }

@@ -32,3 +32,42 @@ Prefix every class with `nucleus-` to avoid colliding with themes and other plug
 /* "Not one of these?" — deliberately quiet. */
 .nucleus-secondary { margin-top: 1.5em; opacity: 0.75; }
 .nucleus-secondary summary { cursor: pointer; }
+
+/* ---------------------------------------------------------------- mobile fit
+ * On a phone the on-screen keyboard eats most of the viewport, and an Obsidian
+ * modal does not scroll by default — so the field you are typing into can end
+ * up underneath the keyboard with no way to reach it. Reported on an iPhone
+ * where the key field and the Connect button were both unreachable.
+ *
+ * Making the wizard's own content scrollable fixes it without touching how
+ * Obsidian sizes modals generally.
+ */
+.nucleus-onboarding {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  max-height: 70vh;
+  /* Room to scroll the last control clear of the keyboard. */
+  padding-bottom: 3em;
+}
+
+.is-mobile .nucleus-onboarding {
+  max-height: 60vh;
+}
+
+/* Long secrets should wrap rather than force the dialog wider than the screen. */
+.nucleus-onboarding input[type="password"],
+.nucleus-onboarding input[type="text"] {
+  min-width: 0;
+  width: 100%;
+}
+
+.is-mobile .nucleus-onboarding .setting-item {
+  display: block;
+}
+.is-mobile .nucleus-onboarding .setting-item-control {
+  justify-content: flex-start;
+  margin-top: 0.4em;
+  width: 100%;
+}
+
+.nucleus-hint { font-size: 0.85em; opacity: 0.7; }

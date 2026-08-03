@@ -149,6 +149,7 @@ export class OnboardingModal extends Modal {
   /** Screen 1 — where your Nucleus is, and the key to get in. */
   private renderConnect(): void {
     const el = this.reset();
+    let keyInput: { setValue: (v: string) => void } | null = null;
     el.createEl("h2", { text: "Connect this vault to your Nucleus" });
     el.createEl("p", {
       text:
@@ -166,16 +167,47 @@ export class OnboardingModal extends Modal {
           .onChange((v) => (this.url = v.trim().replace(/\/+$/, ""))),
       );
 
-    new Setting(el)
+    // A "Paste" button, not just a text field.
+    //
+    // The key is ~200 characters, which nobody types, and on a phone the
+    // long-press-to-paste target sits under the keyboard. A button that reads
+    // the clipboard directly removes the whole problem. Falls back silently to
+    // typing where the clipboard is not readable.
+    const keySetting = new Setting(el)
       .setName("Key")
       .setDesc("The credential your Nucleus issued. Stored in this vault's plugin folder in plain text.")
       .addText((t) => {
+        keyInput = t;
         t.setPlaceholder("paste your key").setValue(this.key).onChange((v) => (this.key = v.trim()));
         t.inputEl.type = "password";
       });
 
+    keySetting.addExtraButton((b) =>
+      b
+        .setIcon("clipboard-paste")
+        .setTooltip("Paste from clipboard")
+        .onClick(async () => {
+          try {
+            const text = (await navigator.clipboard.readText()).trim();
+            if (!text) {
+              new Notice("Your clipboard is empty.");
+              return;
+            }
+            this.key = text;
+            keyInput?.setValue(text);
+            new Notice(`Pasted ${text.length} characters.`);
+          } catch {
+            new Notice("Could not read the clipboard — paste into the box instead.");
+          }
+        }),
+    );
+
 
     const status = el.createEl("p", { cls: "nucleus-status" });
+    el.createEl("p", {
+      text: "Tip: the box scrolls — swipe up inside this dialog if the keyboard covers something.",
+      cls: "nucleus-hint",
+    });
 
     new Setting(el).addButton((b) =>
       b
