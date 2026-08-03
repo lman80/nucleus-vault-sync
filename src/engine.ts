@@ -495,18 +495,24 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   onProgress(0, 1, "checking what is on the server…");
   const fetched = await client.listDocumentsFull();
 
-  // Smallest first, deliberately.
+  // Two phases: everything that makes the vault WORK, then the heavy files.
   //
-  // iOS suspends Obsidian the moment the screen locks, so a phone gets the sync
-  // in short bursts rather than one long run. In path order a single 169 MB
-  // video sits at the front of a burst and blocks every note behind it —
-  // measured on a real phone: 40 MB of 1,466 MB after several sessions, and
-  // barely a note to show for it.
+  // iOS suspends Obsidian the moment the screen locks, so a phone gets sync in
+  // short bursts rather than one long run. In path order a single 169 MB video
+  // sits at the front of a burst and blocks every note behind it — measured on
+  // a real phone: 40 MB of 1,466 MB across several sessions, with barely a note
+  // to show for it.
   //
-  // Sorted by size, the first burst brings down all 447 notes (2.6 MB total)
-  // and the small attachments, so the vault is usable immediately and the
-  // videos trickle in over later sessions instead of holding everything up.
-  const rows = [...fetched].sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0));
+  // So notes and settings go first — all 447 notes are 2.6 MB between them and
+  // land in seconds — and the vault is fully usable before a single video is
+  // touched. Attachments follow smallest-first, and a note whose image has not
+  // arrived yet still opens fine.
+  const isHeavy = (r: DocumentRow) => r.kind === "attachment";
+  const rows = [
+    ...fetched.filter((r) => !isHeavy(r)).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
+    ...fetched.filter(isHeavy).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
+  ];
+  const noteCount = fetched.filter((r) => !isHeavy(r)).length;
   let done = 0;
   let sinceSave = 0;
   let remaining = rows.reduce((sum, r) => sum + (r.byte_size ?? 0), 0);
@@ -517,6 +523,9 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     // so is a wait; the same file in silence is a hang — and carry how much of
     // the whole job is left, so an interrupted sync can be judged rather than
     // guessed at.
+    if (done === noteCount + 1 && noteCount > 0) {
+      onProgress(done, rows.length, "notes are all here — fetching attachments now");
+    }
     remaining -= row.byte_size ?? 0;
     onProgress(
       done,
