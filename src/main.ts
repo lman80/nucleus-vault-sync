@@ -36,6 +36,8 @@ export default class NucleusSyncPlugin extends Plugin {
   /** True while WE are writing, so our own writes do not trigger another pass. */
   private applyingRemote = false;
   private statusEl: HTMLElement | null = null;
+  /** Newest change we have already reacted to, so a poll only acts on news. */
+  private lastSeenChange: string | null = null;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -286,6 +288,9 @@ export default class NucleusSyncPlugin extends Plugin {
     this.setStatus("Nucleus: syncing…");
     try {
       const { pulled, pushed } = await syncBothWays(this.engineOptions());
+      // Our own writes moved the watermark; record it so the watcher does not
+      // immediately see them as somebody else's news.
+      this.lastSeenChange = await this.getClient().latestChange().catch(() => this.lastSeenChange);
       this.announce(pulled, pushed, quiet);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -345,7 +350,10 @@ export default class NucleusSyncPlugin extends Plugin {
       () => {
         if (this.settings.syncOnChange && !this.applyingRemote) void this.syncNow({ quiet: true });
       },
-      8000,
+      // Two seconds, not eight: this is the delay before YOUR edit starts
+      // travelling. Long enough that a burst of typing is one sync, short
+      // enough that switching to your phone finds the change already there.
+      2000,
       true,
     );
 
@@ -366,7 +374,25 @@ export default class NucleusSyncPlugin extends Plugin {
    * so there is no manual teardown here, and no risk of a stale timer surviving
    * a plugin reload.
    */
+  /**
+   * Watch for changes made elsewhere.
+   *
+   * A full sync every few seconds would be wasteful and slow; asking for the
+   * newest `updated_at` is one small request (measured at under a second) and
+   * almost always answers "nothing new". A real pass runs only when that value
+   * moves, which is what makes this feel live without behaving like a poll.
+   *
+   * On iPhone and iPad the timer stops when Obsidian is backgrounded — iOS
+   * suspends the app — so this catches up on return rather than running there.
+   */
   rescheduleTimer(): void {
+    if (this.settings.liveSync) {
+      const seconds = Math.max(2, this.settings.liveIntervalSeconds || 5);
+      this.registerInterval(
+        window.setInterval(() => void this.checkForRemoteChanges(), seconds * 1000),
+      );
+    }
+
     const minutes = this.settings.syncEveryMinutes;
     if (!minutes || minutes <= 0) return;
     this.registerInterval(
@@ -374,5 +400,23 @@ export default class NucleusSyncPlugin extends Plugin {
         if (this.configured && !this.syncing) void this.syncNow({ quiet: true });
       }, minutes * 60_000),
     );
+  }
+
+  /** One cheap question: has anything in this vault changed since we last looked? */
+  private async checkForRemoteChanges(): Promise<void> {
+    if (!this.configured || this.syncing || this.applyingRemote) return;
+    try {
+      const latest = await this.getClient().latestChange();
+      if (latest === this.lastSeenChange) return;
+      // First run just records where we are; syncing on it would fire a full
+      // pass every time Obsidian opens, which startup sync already covers.
+      const firstLook = this.lastSeenChange === null;
+      this.lastSeenChange = latest;
+      if (!firstLook) await this.syncNow({ quiet: true });
+    } catch {
+      // A failed check is not worth telling anyone about — the next one is a
+      // few seconds away, and a notice every five seconds on a flaky
+      // connection would be its own bug.
+    }
   }
 }

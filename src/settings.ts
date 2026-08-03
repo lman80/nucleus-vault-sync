@@ -20,6 +20,10 @@ export interface NucleusSettings {
   syncOnChange: boolean;
   /** Minutes between background passes; 0 turns it off. */
   syncEveryMinutes: number;
+  /** Watch for changes made on other devices and pull them in quickly. */
+  liveSync: boolean;
+  /** Seconds between "has anything changed?" checks. */
+  liveIntervalSeconds: number;
   /** Sync when the vault opens. */
   syncOnStartup: boolean;
   /** Use native fetch for big binaries (needs CORS on your Nucleus). */
@@ -61,6 +65,8 @@ export const DEFAULT_SETTINGS: NucleusSettings = {
   syncOnChange: true,
   syncEveryMinutes: 15,
   syncOnStartup: true,
+  liveSync: true,
+  liveIntervalSeconds: 5,
   preferFetchForBinary: true,
   maxRequestUrlBinaryBytes: 8 * 1024 * 1024,
   state: {},
@@ -159,6 +165,38 @@ export class NucleusSettingTab extends PluginSettingTab {
           await this.plugin.saveSettings();
         }),
       );
+
+    new Setting(containerEl)
+      .setName("Keep up with other devices")
+      .setDesc(
+        "Checks every few seconds whether anything changed elsewhere, and pulls it in when it " +
+          "has. The check itself is one small request — a full sync only runs when something " +
+          "actually moved.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.liveSync).onChange(async (v) => {
+          this.plugin.settings.liveSync = v;
+          await this.plugin.saveSettings();
+          this.plugin.rescheduleTimer();
+          this.display();
+        }),
+      );
+
+    if (this.plugin.settings.liveSync) {
+      new Setting(containerEl)
+        .setName("Check every (seconds)")
+        .setDesc("Lower feels more live and uses a little more data. 5 is a good default.")
+        .addText((t) =>
+          t.setValue(String(this.plugin.settings.liveIntervalSeconds)).onChange(async (v) => {
+            const n = Number(v);
+            if (Number.isFinite(n) && n >= 2) {
+              this.plugin.settings.liveIntervalSeconds = n;
+              await this.plugin.saveSettings();
+              this.plugin.rescheduleTimer();
+            }
+          }),
+        );
+    }
 
     new Setting(containerEl)
       .setName("Every so often")

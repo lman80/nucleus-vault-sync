@@ -418,6 +418,24 @@ export class NucleusClient {
       .sort((a, b) => b.files - a.files);
   }
 
+  /**
+   * The newest `updated_at` in this vault, or null if it is empty.
+   *
+   * One row, two columns — a few hundred bytes and one round trip. This is what
+   * makes near-live sync affordable: polling this every few seconds costs
+   * almost nothing, and a real sync only runs when the answer actually moves.
+   * Polling the document list instead would pull megabytes each time.
+   */
+  async latestChange(): Promise<string | null> {
+    const res = await this.rest(
+      `/rest/v1/documents?select=updated_at` +
+        `&vault=eq.${encodeURIComponent(this.vaultName)}` +
+        `&order=updated_at.desc&limit=1`,
+    );
+    const rows = this.rows<{ updated_at: string }>(res);
+    return rows[0]?.updated_at ?? null;
+  }
+
   async listDocumentsSlim(): Promise<DocRowSlim[]> {
     return this.listPaged<DocRowSlim>("id,source_ref,kind,content_hash,storage_path,deleted_at");
   }
