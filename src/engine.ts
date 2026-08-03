@@ -29,6 +29,18 @@ import { decide, renderNote, conflictName } from "./core/decide";
 import { splitFrontmatter, extractTags, extractLinks, titleFor, mimeFor, sha256, uuidV5 } from "./core/parse";
 import type { DocumentRow, SyncRecord, SyncState } from "./core/types";
 import type { NucleusClient } from "./client";
+import {
+  listConfigFiles,
+  statConfigFile,
+  readConfigText,
+  readConfigBinary,
+  writeConfigText,
+  writeConfigBinary,
+  removeConfigFile,
+  mayWriteConfigPath,
+  isConfigPath,
+  type ConfigSyncOptions,
+} from "./config-sync";
 
 /** Folders never touched, in either direction. */
 const EXCLUDED_PREFIXES = [".obsidian", ".trash", ".smart-env", ".claude", ".claudian", ".git"];
@@ -46,6 +58,8 @@ export interface EngineOptions {
   /** Which attachments this device wants downloaded. Notes always come down. */
   attachments?: "all" | "under-limit" | "none";
   attachmentLimitBytes?: number;
+  /** Whether to carry `.obsidian` — plugins, themes, hotkeys — as well. */
+  config?: ConfigSyncOptions;
 }
 
 export interface PassResult {
@@ -220,6 +234,8 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   const result = emptyResult();
 
   const files = vaultFiles(app);
+  const configOpts = options.config ?? { enabled: false, includeWorkspace: false };
+  const configPaths = await listConfigFiles(app, configOpts);
   const remote = await client.listDocumentsSlim();
   const remoteByPath = new Map(remote.filter((r) => !r.deleted_at).map((r) => [r.source_ref, r]));
 
@@ -292,6 +308,73 @@ export async function push(options: EngineOptions): Promise<PassResult> {
     }
   }
 
+  // The config directory — plugins, themes, hotkeys. Separate loop because
+  // these are invisible to the vault API and have to go through the adapter.
+  for (const path of configPaths) {
+    seen.add(path);
+    try {
+      const info = await statConfigFile(app, path);
+      if (!info) continue;
+
+      const existing = remoteByPath.get(path);
+      const record = state[path];
+      if (
+        existing &&
+        record &&
+        record.size === info.size &&
+        record.mtime === info.mtime &&
+        record.layerHash === existing.content_hash
+      ) {
+        result.unchanged += 1;
+        continue;
+      }
+
+      const bytes = info.binary ? await readConfigBinary(app, path) : null;
+      const text = info.binary ? null : await readConfigText(app, path);
+      const hash = await sha256(info.binary ? bytes! : text!);
+
+      if (existing && existing.content_hash === hash) {
+        result.unchanged += 1;
+        state[path] = { layerHash: hash, diskHash: hash, size: info.size, mtime: info.mtime, at: new Date().toISOString() };
+        continue;
+      }
+
+      const id = existing?.id ?? uuidV5(`${vaultName}\n${path}`);
+      const row: Partial<DocumentRow> = {
+        id,
+        vault: vaultName,
+        source_ref: path,
+        source_app: "obsidian",
+        // Config files ride as attachments: bytes in the file store, not text
+        // inline. A theme's font is not a note and should not sit in a column.
+        kind: info.binary ? "attachment" : "note",
+        title: path.split("/").pop() ?? path,
+        raw: text,
+        body: text,
+        frontmatter: null,
+        tags: [],
+        links: [],
+        content_hash: hash,
+        byte_size: info.size,
+        storage_path: info.binary ? `${vaultName}/${hash}` : null,
+        mime_type: info.binary ? mimeFor(path) : null,
+        file_modified_at: new Date(info.mtime).toISOString(),
+        deleted_at: null,
+      };
+
+      if (info.binary && bytes && row.storage_path) {
+        await client.putObject(row.storage_path, bytes, row.mime_type ?? "application/octet-stream");
+      }
+      await client.upsertDocuments([row]);
+      result.uploaded += 1;
+      state[path] = { layerHash: hash, diskHash: hash, size: info.size, mtime: info.mtime, at: new Date().toISOString() };
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`could not upload ${path}: ${reason}`);
+      result.failed.push({ path, reason });
+    }
+  }
+
   // Anything the layer still calls live but the vault no longer has.
   const gone = remote.filter((r) => !r.deleted_at && !seen.has(r.source_ref));
   const liveCount = remote.filter((r) => !r.deleted_at).length;
@@ -339,6 +422,64 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   for (const row of rows) {
     done += 1;
     onProgress(done, rows.length, row.source_ref);
+
+    const configOpts = options.config ?? { enabled: false, includeWorkspace: false };
+
+    // Config files take a completely different route: the vault API cannot see
+    // or write inside `.obsidian`, so they are read, hashed and written through
+    // the adapter. The permission check runs on the way DOWN as well as up,
+    // because a row written by an older version could otherwise deliver
+    // another device's key and sync record into this vault.
+    if (isConfigPath(app, row.source_ref)) {
+      if (!mayWriteConfigPath(app, row.source_ref, configOpts)) {
+        result.skipped += 1;
+        continue;
+      }
+      try {
+        const info = await statConfigFile(app, row.source_ref);
+        const onDiskHash = !info
+          ? null
+          : info.binary
+            ? await sha256(await readConfigBinary(app, row.source_ref))
+            : await sha256(await readConfigText(app, row.source_ref));
+
+        const { action } = decide({ row, onDisk: onDiskHash, record: state[row.source_ref] });
+        if (action === "none") {
+          result.unchanged += 1;
+          continue;
+        }
+        if (action === "delete") {
+          if (info && onDiskHash === state[row.source_ref]?.diskHash) {
+            await removeConfigFile(app, row.source_ref);
+            delete state[row.source_ref];
+            result.deletedLocally += 1;
+          }
+          continue;
+        }
+        // A conflicting config file is not worth a "(conflict)" twin sitting in
+        // a plugin folder where Obsidian may try to load it. Newest wins here,
+        // and the file is small enough that nothing meaningful is lost.
+        if (row.kind === "attachment" && row.storage_path) {
+          await writeConfigBinary(app, row.source_ref, await client.getObject(row.storage_path));
+        } else {
+          await writeConfigText(app, row.source_ref, row.raw ?? row.body ?? "");
+        }
+        const after = await statConfigFile(app, row.source_ref);
+        state[row.source_ref] = {
+          layerHash: row.content_hash ?? null,
+          diskHash: row.content_hash ?? null,
+          size: after?.size,
+          mtime: after?.mtime,
+          at: new Date().toISOString(),
+        };
+        result.downloaded += 1;
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        log(`could not write ${row.source_ref}: ${reason}`);
+        result.failed.push({ path: row.source_ref, reason });
+      }
+      continue;
+    }
 
     if (isExcluded(row.source_ref)) continue;
 

@@ -130,6 +130,10 @@ export default class NucleusSyncPlugin extends Plugin {
       saveState: this.saveState,
       attachments: this.settings.attachments,
       attachmentLimitBytes: this.settings.attachmentLimitBytes,
+      config: {
+        enabled: this.settings.syncConfig,
+        includeWorkspace: this.settings.syncWorkspaceLayout,
+      },
       log: (line: string) => {
         console.warn("[nucleus]", line);
         report?.(line);

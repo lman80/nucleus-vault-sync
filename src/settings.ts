@@ -48,6 +48,10 @@ export interface NucleusSettings {
   attachments: "all" | "under-limit" | "none";
   /** Size ceiling for "under-limit", in bytes. */
   attachmentLimitBytes: number;
+  /** Carry `.obsidian` too — plugins, themes, snippets, hotkeys. */
+  syncConfig: boolean;
+  /** Include which panes are open. Per-device by nature; off by default. */
+  syncWorkspaceLayout: boolean;
 }
 
 export const DEFAULT_SETTINGS: NucleusSettings = {
@@ -61,8 +65,12 @@ export const DEFAULT_SETTINGS: NucleusSettings = {
   maxRequestUrlBinaryBytes: 8 * 1024 * 1024,
   state: {},
   onboarded: false,
-  attachments: "under-limit",
+  // Everything, by default. The whole point of the layer is that it holds all
+  // of it; a device that quietly leaves the video behind is not a copy.
+  attachments: "all",
   attachmentLimitBytes: 25 * 1024 * 1024,
+  syncConfig: true,
+  syncWorkspaceLayout: false,
 };
 
 export class NucleusSettingTab extends PluginSettingTab {
@@ -163,6 +171,35 @@ export class NucleusSettingTab extends PluginSettingTab {
           this.plugin.rescheduleTimer();
         }),
       );
+
+    containerEl.createEl("h3", { text: "App settings and plugins" });
+
+    new Setting(containerEl)
+      .setName("Sync plugins, themes and hotkeys")
+      .setDesc(
+        "Carries the .obsidian folder as well as your notes, so a new device comes up with the " +
+          "same plugins and the same setup. Your key and this device's sync record are never " +
+          "sent — they have to differ per device.",
+      )
+      .addToggle((t) =>
+        t.setValue(this.plugin.settings.syncConfig).onChange(async (v) => {
+          this.plugin.settings.syncConfig = v;
+          await this.plugin.saveSettings();
+          this.display();
+        }),
+      );
+
+    if (this.plugin.settings.syncConfig) {
+      new Setting(containerEl)
+        .setName("Also sync which panes are open")
+        .setDesc("Off by default — a Mac's window layout is rarely what you want on a phone.")
+        .addToggle((t) =>
+          t.setValue(this.plugin.settings.syncWorkspaceLayout).onChange(async (v) => {
+            this.plugin.settings.syncWorkspaceLayout = v;
+            await this.plugin.saveSettings();
+          }),
+        );
+    }
 
     containerEl.createEl("h3", { text: "Attachments" });
 
