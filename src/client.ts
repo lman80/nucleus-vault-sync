@@ -30,6 +30,10 @@
 
 import { requestUrl, type RequestUrlResponse } from "obsidian";
 
+import { isTransientMessage, TIMEOUT_MESSAGE } from "./core/transient";
+
+export { TIMEOUT_MESSAGE };
+
 import type { DocumentRow } from "./core/types";
 
 /** Attachment bytes all live in one bucket; the path inside it is the identity. */
@@ -96,8 +100,7 @@ const USER_AGENT = "ObsidianNucleus/0.1.0";
  * and "Failed to fetch" are the entire error message on iOS and Android, which
  * is also, unhelpfully, what a CORS rejection looks like from inside the page.
  */
-const TRANSIENT =
-  /ETIMEDOUT|ECONNRESET|ECONNREFUSED|EPIPE|ENOTFOUND|EAI_AGAIN|terminated|socket hang up|network|fetch failed|failed to fetch|load failed|timed out|connection appears to be offline|net::ERR/i;
+
 
 export interface NucleusConfig {
   url: string;
@@ -159,7 +162,7 @@ function messageOf(error: unknown): string {
 function isRetryable(error: unknown): boolean {
   if (error instanceof TransportError) return true;
   if (error instanceof HttpError) return error.retryable;
-  return TRANSIENT.test(messageOf(error));
+  return isTransientMessage(messageOf(error));
 }
 
 /** Response header casing is not stable across platforms — normalise before reading. */
@@ -219,12 +222,12 @@ export class NucleusClient {
 
   private transportError(error: unknown, label: string): Error {
     const detail = this.redact(messageOf(error));
-    if (TRANSIENT.test(detail)) {
+    if (isTransientMessage(detail)) {
       return new TransportError(
         // A timeout means the server answered and the reply was too slow or
         // too large — telling someone to check the URL sends them to look at
         // exactly the wrong thing.
-        /took longer than/.test(detail)
+        new RegExp(TIMEOUT_MESSAGE).test(detail)
           ? `${label}: ${detail}.\n\nThe request went out but nothing came back. If this device is on ` +
             `Tailscale, that address routes privately rather than over the internet — and a ` +
             `half-connected Tailscale gives exactly this: the name resolves, the traffic goes ` +
@@ -290,7 +293,7 @@ export class NucleusClient {
   private withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const timer = setTimeout(() => {
-        reject(new TransportError(`${label}: took longer than ${Math.round(ms / 1000)}s`));
+        reject(new TransportError(`${label}: ${TIMEOUT_MESSAGE} ${Math.round(ms / 1000)}s`));
       }, ms);
       work.then(
         (value) => {

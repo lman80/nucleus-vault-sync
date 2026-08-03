@@ -23,7 +23,7 @@
  */
 
 import type { App, TFile, TFolder } from "obsidian";
-import { normalizePath, TFile as TFileClass } from "obsidian";
+import { normalizePath, TFile as TFileClass, TFolder as TFolderClass } from "obsidian";
 
 import { decide, renderNote, conflictName } from "./core/decide";
 import { splitFrontmatter, extractTags, extractLinks, titleFor, mimeFor, sha256, uuidV5 } from "./core/parse";
@@ -240,6 +240,8 @@ export async function setAside(
       failed.push({ path: file.path, reason });
     }
   }
+  // Everything moved out of the old tree; do not leave its skeleton standing.
+  await removeEmptyFolders(app, log);
   return { moved, failed };
 }
 
@@ -298,7 +300,61 @@ export async function replaceLocal(
       failed.push({ path: file.path, reason });
     }
   }
+  // The files are gone; the folders they lived in should go too.
+  await removeEmptyFolders(app, log);
   return { removed, failed };
+}
+
+
+/**
+ * Remove folders that no longer hold anything.
+ *
+ * Obsidian's file list contains files, not folders, so removing every file
+ * leaves the whole directory tree standing — empty. After "start clean" that
+ * means a vault that reports zero notes and still shows every folder you were
+ * trying to get rid of, which reads as a half-done job because it is one.
+ *
+ * Deepest first, so a folder whose only contents were other empty folders is
+ * itself emptied before it is judged. Repeats until a pass removes nothing,
+ * which is cheaper than reasoning about depth and impossible to get wrong.
+ */
+export async function removeEmptyFolders(
+  app: App,
+  log: (line: string) => void = () => {},
+): Promise<number> {
+  let removedTotal = 0;
+
+  for (;;) {
+    const empties: TFolder[] = [];
+    const walk = (folder: TFolder): void => {
+      for (const child of folder.children) {
+        if (child instanceof TFolderClass) walk(child);
+      }
+      // Never the vault root, and never anything excluded — the config folder
+      // is not ours to tidy.
+      if (folder.path === "/" || folder.path === "") return;
+      if (isExcluded(folder.path)) return;
+      if (folder.children.length === 0) empties.push(folder);
+    };
+    walk(app.vault.getRoot());
+
+    if (empties.length === 0) break;
+
+    let removedThisPass = 0;
+    // Deepest first: removing a child can make its parent empty.
+    for (const folder of empties.sort((a, b) => b.path.length - a.path.length)) {
+      try {
+        await app.fileManager.trashFile(folder);
+        removedThisPass += 1;
+      } catch (error) {
+        log(`could not remove empty folder ${folder.path}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    if (removedThisPass === 0) break;
+    removedTotal += removedThisPass;
+  }
+
+  return removedTotal;
 }
 
 /**
