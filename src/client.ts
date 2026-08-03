@@ -318,12 +318,82 @@ export class NucleusClient {
    * error body (`{"code":"PGRST116","message":…}`), the only thing that ever
    * explains what went wrong, is gone. Check `status` here instead.
    */
+  /**
+   * Has native fetch been refused for data requests on this device?
+   *
+   * Only set after an actual failure. A server without CORS on /rest/v1 needs
+   * the bridge; one with it — as PostgREST is by default — does not.
+   */
+  private restFetchBlocked = false;
+
+  /**
+   * A data request, over native fetch where possible.
+   *
+   * `requestUrl` marshals bodies across the mobile bridge as base64, which
+   * inflates every response by a third and has to hold the encoded string and
+   * the decoded copy at once. On an 8 MB plugin bundle that is the difference
+   * between a request that finishes and one that does not — observed failing at
+   * 560 of 571 files, on exactly the largest ones.
+   *
+   * PostgREST answers every origin with `*`, so fetch simply works and skips
+   * the bridge entirely. If a particular server does not, the first failure
+   * falls back to `requestUrl` and stays there.
+   */
+  private async restViaFetch(path: string, init: { method?: string; body?: string; prefer?: string }) {
+    const res = await fetch(`${this.url}${path}`, {
+      method: init.method ?? "GET",
+      headers: {
+        ...this.authHeaders,
+        Accept: "application/json",
+        ...(init.body === undefined ? {} : { "Content-Type": "application/json" }),
+        ...(init.prefer === undefined ? {} : { Prefer: init.prefer }),
+      },
+      body: init.body,
+    });
+    const text = await res.text();
+    const headers: Record<string, string> = {};
+    res.headers.forEach((v, k) => (headers[k.toLowerCase()] = v));
+    // Shaped like a RequestUrlResponse so callers cannot tell the difference.
+    return {
+      status: res.status,
+      headers,
+      text,
+      arrayBuffer: new ArrayBuffer(0),
+      get json() {
+        try {
+          return JSON.parse(text);
+        } catch {
+          return null;
+        }
+      },
+    } as unknown as RequestUrlResponse;
+  }
+
   private async rest(
     path: string,
     init: { method?: string; body?: string; prefer?: string } = {},
   ): Promise<RequestUrlResponse> {
     const method = init.method ?? "GET";
     const label = `${method} ${path.split("?")[0] ?? path}`;
+
+    if (this.preferFetchForBinary && !this.restFetchBlocked) {
+      try {
+        return await this.withRetry(async () => {
+          const res = await this.withTimeout(
+            this.restViaFetch(path, init),
+            this.timeoutFor(this.attempt),
+            label,
+          );
+          if (res.status >= 400) throw this.httpError(res.status, res.text ?? "", label);
+          return res;
+        });
+      } catch (error) {
+        // An HTTP error is a real answer — do not retry it down the slow path.
+        if (error instanceof HttpError) throw error;
+        this.restFetchBlocked = true;
+        // Fall through and try the bridge once before giving up.
+      }
+    }
 
     return this.withRetry(async () => {
       let res: RequestUrlResponse;
