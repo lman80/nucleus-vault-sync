@@ -25,8 +25,8 @@
 import { Notice, Plugin, TFile, debounce } from "obsidian";
 
 import { NucleusClient } from "./client";
-import { pull, push, syncBothWays, isExcluded, type PassResult } from "./engine";
-import { OnboardingModal, type Situation } from "./onboarding";
+import { pull, push, syncBothWays, setAside, isExcluded, type PassResult } from "./engine";
+import { OnboardingModal, SET_ASIDE_FOLDER, type MergeChoice, type Situation } from "./onboarding";
 import { DEFAULT_SETTINGS, NucleusSettingTab, type NucleusSettings } from "./settings";
 
 export default class NucleusSyncPlugin extends Plugin {
@@ -157,16 +157,35 @@ export default class NucleusSyncPlugin extends Plugin {
         }
         return result;
       },
-      onRun: async (situation: Situation, report) => {
+      onRun: async (situation: Situation, mergeChoice: MergeChoice, report) => {
         const options = this.engineOptions(report);
         this.applyingRemote = true;
         try {
           let pulled: PassResult | null = null;
           let pushed: PassResult | null = null;
 
-          if (situation === "restore") pulled = await pull(options);
-          else if (situation === "upload") pushed = await push(options);
-          else {
+          let movedAside = 0;
+
+          if (situation === "restore") {
+            pulled = await pull(options);
+          } else if (situation === "upload") {
+            pushed = await push(options);
+          } else if (mergeChoice === "set-aside") {
+            // Move what is here out of the way FIRST, so the layer's copy lands
+            // on an empty tree and no file ever has to be reconciled. After the
+            // move the vault is effectively empty, so this becomes a plain
+            // restore — then the set-aside notes are pushed up as new files.
+            report(`Moving ${SET_ASIDE_FOLDER}…`);
+            const aside = await setAside(this.app, SET_ASIDE_FOLDER, report);
+            movedAside = aside.moved;
+            pulled = await pull(options);
+            pushed = await push(options);
+          } else if (mergeChoice === "upload-mine") {
+            // Local wins: send everything up first, so anything that differs is
+            // resolved in the vault's favour, then bring down what is missing.
+            pushed = await push(options);
+            pulled = await pull(options);
+          } else {
             const both = await syncBothWays(options);
             pulled = both.pulled;
             pushed = both.pushed;
@@ -176,6 +195,7 @@ export default class NucleusSyncPlugin extends Plugin {
           await this.saveSettings();
 
           const parts: string[] = [];
+          if (movedAside) parts.push(`${movedAside} moved into "${SET_ASIDE_FOLDER}"`);
           if (pulled?.downloaded) parts.push(`${pulled.downloaded} downloaded`);
           if (pushed?.uploaded) parts.push(`${pushed.uploaded} uploaded`);
           if (pulled?.deletedLocally) parts.push(`${pulled.deletedLocally} removed here`);

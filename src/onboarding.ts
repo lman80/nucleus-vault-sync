@@ -25,6 +25,12 @@ import { vaultFiles } from "./engine";
 
 export type Situation = "fresh" | "upload" | "restore" | "merge";
 
+/** How to resolve a first sync where both sides already have files. */
+export type MergeChoice = "set-aside" | "side-by-side" | "upload-mine";
+
+/** Where set-aside puts what was already here. */
+export const SET_ASIDE_FOLDER = "Before Nucleus";
+
 export interface Survey {
   situation: Situation;
   vaultFileCount: number;
@@ -87,12 +93,10 @@ export function explain(s: Survey): { heading: string; body: string[]; confirm: 
       return {
         heading: "Both sides already have files",
         body: [
-          `This vault has ${s.vaultFileCount} files and your Nucleus has ${s.layerFileCount}.`,
-          "Because this device has never synced before, there is no record of when the two last agreed — so nothing here will be overwritten.",
-          "Files that match are left alone. Files that differ are kept BOTH ways: yours stays exactly as it is, and the Nucleus version is saved next to it with “(conflict …)” in the name, for you to compare.",
-          "Anything only one side has is simply copied to the other.",
+          `This vault has ${s.vaultFileCount} file${s.vaultFileCount === 1 ? "" : "s"} and your Nucleus has ${s.layerFileCount}.`,
+          "Choose what to do with what is already here. Nothing is deleted in any of these.",
         ],
-        confirm: "Sync carefully",
+        confirm: "Continue",
       };
   }
 }
@@ -101,6 +105,7 @@ interface WizardCallbacks {
   onConnect: (url: string, key: string, vaultName: string) => Promise<{ ok: boolean; message: string }>;
   onRun: (
     situation: Situation,
+    mergeChoice: MergeChoice,
     report: (line: string) => void,
   ) => Promise<{ summary: string; conflicts: number; failed: number }>;
   makeClient: (url: string, key: string, vaultName: string) => NucleusClient;
@@ -116,7 +121,11 @@ export class OnboardingModal extends Modal {
   private key: string;
   private vaultName: string;
   private surveyed: Survey | null = null;
+  private mergeChoice: MergeChoice = "set-aside";
   private vaults: { name: string; files: number }[] = [];
+  /** What testConnection said the layer holds — the cross-check on the list. */
+  private layerTotal = 0;
+  private listError: string | null = null;
   private busy = false;
 
   constructor(app: App, private cb: WizardCallbacks) {
@@ -187,7 +196,18 @@ export class OnboardingModal extends Modal {
               return;
             }
             status.setText("Connected. Looking at what is already in your Nucleus…");
-            this.vaults = await this.cb.makeClient(this.url, this.key, "").listVaults();
+            // testConnection reports a total; keep it, because an empty vault
+            // list next to a non-zero total means the LIST failed — not that
+            // the Nucleus is empty. Believing the empty list is how the first
+            // version offered to start a new vault on top of 674 real files.
+            this.layerTotal = Number(/(\d+)\s+document/.exec(test.message)?.[1] ?? 0);
+            this.listError = null;
+            try {
+              this.vaults = await this.cb.makeClient(this.url, this.key, "").listVaults();
+            } catch (error) {
+              this.vaults = [];
+              this.listError = error instanceof Error ? error.message : String(error);
+            }
             this.renderPickVault();
           } catch (error) {
             status.setText(error instanceof Error ? error.message : String(error));
@@ -213,6 +233,33 @@ export class OnboardingModal extends Modal {
     el.createEl("h2", { text: "Which notes should this vault hold?" });
 
     const folder = this.app.vault.getName();
+
+    // An empty list when the layer says it holds documents is a fault, and
+    // must never be presented as "your Nucleus is empty".
+    if (this.vaults.length === 0 && (this.layerTotal > 0 || this.listError)) {
+      el.createEl("h2", { text: "Could not read your vault list" });
+      el.createEl("p", {
+        text:
+          this.layerTotal > 0
+            ? `Your Nucleus reports ${this.layerTotal} documents, but the list of vaults came back empty. ` +
+              `Something is wrong with reading it — do NOT continue, or you would start a second, empty vault ` +
+              `alongside your real one.`
+            : "The list of vaults could not be read.",
+      });
+      if (this.listError) el.createEl("pre", { text: this.listError, cls: "nucleus-log" });
+
+      let typed = "";
+      new Setting(el)
+        .setName("Or type the vault name")
+        .setDesc("If you know it, you can enter it directly and carry on.")
+        .addText((t) => t.setPlaceholder("exact vault name").onChange((v) => (typed = v.trim())));
+      new Setting(el)
+        .addButton((b) => b.setButtonText("Back").onClick(() => this.renderConnect()))
+        .addButton((b) =>
+          b.setButtonText("Use that name").onClick(() => { if (typed) void this.chooseVault(typed); }),
+        );
+      return;
+    }
 
     if (this.vaults.length === 0) {
       el.createEl("p", {
@@ -250,10 +297,20 @@ export class OnboardingModal extends Modal {
         );
     }
 
-    new Setting(el)
-      .setName("Something else")
-      .setDesc("Start a separate vault in your Nucleus, kept apart from the ones above.")
-      .addButton((b) => b.setButtonText(`Start "${folder}"`).onClick(() => void this.chooseVault(folder)));
+    // Deliberately understated and last. In the first version this sat level
+    // with the real vaults, pre-filled with the folder name — and got clicked,
+    // which started an empty second vault beside 674 real files. A destructive
+    // choice should not look like the obvious one.
+    const other = el.createEl("details", { cls: "nucleus-secondary" });
+    other.createEl("summary", { text: "Not one of these?" });
+    other.createEl("p", {
+      text:
+        `Starting a separate vault means these notes will NOT be downloaded. ` +
+        `Only do this if you want a second, unrelated set of notes.`,
+    });
+    new Setting(other)
+      .setName(`Start a new vault called "${folder}"`)
+      .addButton((b) => b.setButtonText("Start separate").setWarning().onClick(() => void this.chooseVault(folder)));
 
     new Setting(el).addButton((b) => b.setButtonText("Back").onClick(() => this.renderConnect()));
   }
@@ -273,6 +330,60 @@ export class OnboardingModal extends Modal {
     }
   }
 
+
+  /**
+   * The merge chooser.
+   *
+   * The first version had no choice in it: every differing file got a
+   * "(conflict)" twin scattered through the tree. Safe, and awful to live with
+   * — you are left untangling a vault note by note. The default now is the
+   * thing most people actually want: put what was here into one folder, and let
+   * the Nucleus copy arrive clean.
+   */
+  private renderMergeChoice(): void {
+    const el = this.reset();
+    const s = this.surveyed!;
+    el.createEl("h2", { text: "Both sides already have files" });
+    el.createEl("p", {
+      text: `This vault has ${s.vaultFileCount} file${s.vaultFileCount === 1 ? "" : "s"}. Your Nucleus has ${s.layerFileCount}.`,
+    });
+    el.createEl("p", { text: "Nothing is deleted in any of these options." });
+
+    new Setting(el)
+      .setName(`Put what is here into a "${SET_ASIDE_FOLDER}" folder  ·  recommended`)
+      .setDesc(
+        `Everything currently in this vault moves into a folder called "${SET_ASIDE_FOLDER}", ` +
+          `keeping its structure. Then your ${s.layerFileCount} files download normally. ` +
+          `You end up with your Nucleus notes where they belong, and the old contents in one ` +
+          `tidy place you can look through or delete.`,
+      )
+      .addButton((b) =>
+        b.setButtonText("Do this").setCta().onClick(() => { this.mergeChoice = "set-aside"; this.renderRun(); }),
+      );
+
+    new Setting(el)
+      .setName("Keep both, side by side")
+      .setDesc(
+        "Files that match are left alone. Files that differ keep BOTH versions — yours untouched, " +
+          "the Nucleus one saved next to it marked “(conflict …)”. Safest, messiest.",
+      )
+      .addButton((b) =>
+        b.setButtonText("Do this").onClick(() => { this.mergeChoice = "side-by-side"; this.renderRun(); }),
+      );
+
+    new Setting(el)
+      .setName("Send mine up instead")
+      .setDesc(
+        `Treat this vault as the true copy and upload it. Files in your Nucleus that are not here ` +
+          `are still downloaded — nothing is removed from your Nucleus.`,
+      )
+      .addButton((b) =>
+        b.setButtonText("Do this").onClick(() => { this.mergeChoice = "upload-mine"; this.renderRun(); }),
+      );
+
+    new Setting(el).addButton((b) => b.setButtonText("Back").onClick(() => this.renderPickVault()));
+  }
+
   /** Screen 3 — what is about to happen, before it happens. */
   private renderConfirm(): void {
     if (!this.surveyed) return this.renderConnect();
@@ -280,6 +391,28 @@ export class OnboardingModal extends Modal {
     const el = this.reset();
 
     el.createEl("h2", { text: plan.heading });
+    el.createEl("p", {
+      text: `Vault in your Nucleus: “${this.vaultName}”`,
+      cls: "nucleus-chosen",
+    });
+
+    // The check that would have caught the wrong pick immediately: about to
+    // create a vault that does not exist, while other vaults do.
+    const known = this.vaults.some((v) => v.name === this.vaultName);
+    if (!known && this.vaults.length > 0) {
+      const warn = el.createEl("div", { cls: "nucleus-warning" });
+      warn.createEl("p", {
+        text: `⚠ “${this.vaultName}” is NOT one of the vaults already in your Nucleus.`,
+      });
+      warn.createEl("p", {
+        text:
+          `This will start a brand new, separate vault. Your existing notes will not be ` +
+          `downloaded here. Did you mean ${this.vaults.map((v) => `“${v.name}”`).join(" or ")}?`,
+      });
+      new Setting(warn).addButton((b) =>
+        b.setButtonText("Go back and pick").setCta().onClick(() => this.renderPickVault()),
+      );
+    }
     for (const line of plan.body) el.createEl("p", { text: line });
 
     if (this.surveyed.situation === "merge") {
@@ -301,6 +434,10 @@ export class OnboardingModal extends Modal {
               this.close();
               return;
             }
+            if (this.surveyed!.situation === "merge") {
+              this.renderMergeChoice();
+              return;
+            }
             this.renderRun();
           }),
       );
@@ -319,7 +456,7 @@ export class OnboardingModal extends Modal {
     };
 
     try {
-      const outcome = await this.cb.onRun(this.surveyed!.situation, report);
+      const outcome = await this.cb.onRun(this.surveyed!.situation, this.mergeChoice, report);
       el.empty();
       el.createEl("h2", { text: "Done" });
       el.createEl("p", { text: outcome.summary });

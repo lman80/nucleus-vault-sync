@@ -17,3 +17,18 @@ Prefix every class with `nucleus-` to avoid colliding with themes and other plug
 .nucleus-sync-error {
 	color: var(--text-error);
 }
+
+/* The chosen vault, stated plainly — it is the fact most worth checking. */
+.nucleus-chosen { font-weight: 600; }
+
+/* About to start a separate vault while real ones exist. */
+.nucleus-warning {
+  border: 1px solid var(--text-error);
+  border-radius: 6px;
+  padding: 0.5em 0.9em;
+  margin: 0.8em 0;
+}
+
+/* "Not one of these?" — deliberately quiet. */
+.nucleus-secondary { margin-top: 1.5em; opacity: 0.75; }
+.nucleus-secondary summary { cursor: pointer; }

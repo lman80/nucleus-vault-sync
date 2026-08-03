@@ -159,6 +159,49 @@ export async function describeFile(
   };
 }
 
+
+/**
+ * Move everything currently in the vault into one folder, so the layer's copy
+ * can arrive on a clean floor.
+ *
+ * This is the default answer when both sides have files and they have never
+ * synced. Interleaving two histories and sprinkling "(conflict)" copies through
+ * the tree is technically safe and practically horrible — you end up with a
+ * vault you have to untangle note by note. Setting the old contents aside keeps
+ * every byte, keeps the folder structure, and leaves the result obvious: your
+ * notes are in one place, the ones from your Nucleus are where they belong.
+ *
+ * Uses `fileManager.renameFile` rather than `vault.rename` so links between the
+ * moved notes are rewritten and keep working.
+ */
+export async function setAside(
+  app: App,
+  folderName: string,
+  log: (line: string) => void = () => {},
+): Promise<{ moved: number; failed: { path: string; reason: string }[] }> {
+  const files = vaultFiles(app);
+  const failed: { path: string; reason: string }[] = [];
+  let moved = 0;
+
+  if (files.length === 0) return { moved, failed };
+
+  for (const file of files) {
+    // Do not move things into themselves on a second run.
+    if (file.path.startsWith(`${folderName}/`)) continue;
+    const target = normalizePath(`${folderName}/${file.path}`);
+    try {
+      await ensureParentFolders(app, target);
+      await app.fileManager.renameFile(file, target);
+      moved += 1;
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      log(`could not move ${file.path}: ${reason}`);
+      failed.push({ path: file.path, reason });
+    }
+  }
+  return { moved, failed };
+}
+
 /**
  * Push: make the layer match the vault.
  *
