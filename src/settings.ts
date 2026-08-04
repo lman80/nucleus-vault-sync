@@ -252,6 +252,7 @@ export class NucleusSettingTab extends PluginSettingTab {
         t.setValue(this.plugin.settings.syncConfig).onChange(async (v) => {
           this.plugin.settings.syncConfig = v;
           await this.plugin.saveSettings();
+          this.plugin.rescheduleTimer();
           this.display();
         }),
       );
@@ -267,6 +268,7 @@ export class NucleusSettingTab extends PluginSettingTab {
           t.setValue(this.plugin.settings.syncPluginCaches).onChange(async (v) => {
             this.plugin.settings.syncPluginCaches = v;
             await this.plugin.saveSettings();
+            this.plugin.rescheduleTimer();
           }),
         );
     }

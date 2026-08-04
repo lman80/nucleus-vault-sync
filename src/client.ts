@@ -92,7 +92,7 @@ const DEFAULT_MAX_REQUESTURL_BINARY_BYTES = 8 * 1024 * 1024;
  * from `fetch` as a forbidden header name, and asking for it would achieve
  * nothing except widening the CORS preflight.
  */
-const USER_AGENT = "ObsidianNucleus/0.1.0";
+const USER_AGENT = "ObsidianNucleus/0.13.0";
 
 /**
  * Faults worth trying again rather than giving up on. The last few entries are
@@ -121,6 +121,7 @@ export interface DocRowSlim {
   kind: string;
   content_hash: string | null;
   storage_path: string | null;
+  byte_size: number | null;
   deleted_at: string | null;
 }
 
@@ -541,7 +542,9 @@ export class NucleusClient {
   }
 
   async listDocumentsSlim(): Promise<DocRowSlim[]> {
-    return this.listPaged<DocRowSlim>("id,source_ref,kind,content_hash,storage_path,deleted_at");
+    return this.listPaged<DocRowSlim>(
+      "id,source_ref,kind,content_hash,storage_path,byte_size,deleted_at",
+    );
   }
 
   /** Full rows — body, frontmatter, raw. Only a restore needs this much. */
@@ -560,7 +563,7 @@ export class NucleusClient {
    */
   async listDocumentsMeta(): Promise<DocumentRow[]> {
     return this.listPaged<DocumentRow>(
-      "id,vault,source_ref,source_app,kind,title,content_hash,byte_size,storage_path,mime_type,file_modified_at,updated_at,deleted_at",
+      "id,vault,source_ref,source_app,kind,title,content_hash,byte_size,storage_path,mime_type,file_created_at,file_modified_at,updated_at,deleted_at",
     );
   }
 
@@ -654,10 +657,15 @@ export class NucleusClient {
 
   // ----------------------------------------------------------------- storage
 
-  /** Storage paths are `<vaultName>/<sha256>`; the hash may only ever be part
-   *  of a path, so `encodeURI` (not `encodeURIComponent`) keeps the slash. */
+  /** Encode each path component while preserving separators. `encodeURI`
+   * leaves `#` and `?` untouched, so vault names containing either would point
+   * at the wrong object. */
+  private encodedObjectPath(storagePath: string): string {
+    return storagePath.split("/").map(encodeURIComponent).join("/");
+  }
+
   private objectUrl(storagePath: string): string {
-    return `${this.url}/storage/v1/object/${BUCKET}/${encodeURI(storagePath)}`;
+    return `${this.url}/storage/v1/object/${BUCKET}/${this.encodedObjectPath(storagePath)}`;
   }
 
   /** Object metadata, or null if the object is not there. Used both to answer
@@ -669,7 +677,7 @@ export class NucleusClient {
       try {
         res = await this.withTimeout(
           requestUrl({
-            url: `${this.url}/storage/v1/object/info/${BUCKET}/${encodeURI(storagePath)}`,
+            url: `${this.url}/storage/v1/object/info/${BUCKET}/${this.encodedObjectPath(storagePath)}`,
             method: "GET",
             headers: { ...this.authHeaders, "User-Agent": USER_AGENT },
             throw: false,

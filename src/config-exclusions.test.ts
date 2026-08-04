@@ -71,3 +71,10 @@ test("a path merely STARTING with the config dir name is not inside it", () => {
   // ".obsidian-backup/..." must not be mistaken for ".obsidian/..."
   assert.equal(mayWriteConfigPath(app, ".obsidian-backup/hotkeys.json", on), false);
 });
+
+test("server paths cannot escape the vault or config directory", () => {
+  assert.equal(mayWriteConfigPath(app, ".obsidian/../Secrets.txt", on), false);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/plugins/../../Secrets.txt", on), false);
+  assert.equal(mayWriteConfigPath(app, "/.obsidian/hotkeys.json", on), false);
+  assert.equal(mayWriteConfigPath(app, ".obsidian\\hotkeys.json", on), false);
+});

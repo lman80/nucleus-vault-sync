@@ -30,6 +30,11 @@ import { splitFrontmatter, extractTags, extractLinks, titleFor, mimeFor, sha256,
 import type { DocumentRow, SyncRecord, SyncState } from "./core/types";
 import type { NucleusClient } from "./client";
 import {
+  isExcludedVaultPath,
+  isManagedRemoteDocument,
+  isManagedRemotePath,
+} from "./core/sync-scope";
+import {
   listConfigFiles,
   statConfigFile,
   readConfigText,
@@ -41,9 +46,6 @@ import {
   isConfigPath,
   type ConfigSyncOptions,
 } from "./config-sync";
-
-/** Folders never touched, in either direction. */
-const EXCLUDED_PREFIXES = [".obsidian", ".trash", ".smart-env", ".claude", ".claudian", ".git"];
 
 export interface EngineOptions {
   app: App;
@@ -70,6 +72,8 @@ export interface EngineOptions {
    * the heavy half afterwards.
    */
   only?: "text" | "attachments";
+  /** False for setup modes where remote-only files must be preserved. */
+  deleteRemoteMissing?: boolean;
 }
 
 export interface PassResult {
@@ -101,7 +105,7 @@ const emptyResult = (): PassResult => ({
 });
 
 export function isExcluded(path: string): boolean {
-  return EXCLUDED_PREFIXES.some((p) => path === p || path.startsWith(`${p}/`));
+  return isExcludedVaultPath(path);
 }
 
 /** Bytes as a short human string, for progress lines. */
@@ -144,6 +148,26 @@ async function ensureParentFolders(app: App, path: string): Promise<void> {
       await app.vault.adapter.mkdir(normalizePath(sofar));
     }
   }
+}
+
+/** Preserve a locally changed config file somewhere Obsidian will not load it. */
+async function backUpConfigConflict(
+  app: App,
+  path: string,
+  info: NonNullable<Awaited<ReturnType<typeof statConfigFile>>>,
+): Promise<string> {
+  const relative = path.startsWith(`${app.vault.configDir}/`)
+    ? path.slice(app.vault.configDir.length + 1)
+    : path;
+  const named = conflictName(relative, new Date().toISOString());
+  const target = normalizePath(`Nucleus Config Conflicts/${named}`);
+  await ensureParentFolders(app, target);
+  if (info.binary) {
+    await app.vault.createBinary(target, await readConfigBinary(app, path));
+  } else {
+    await app.vault.create(target, await readConfigText(app, path));
+  }
+  return target;
 }
 
 /** Read one vault file as the row the layer expects. Bytes are NOT included. */
@@ -388,6 +412,19 @@ function timesFor(row: DocumentRow): { ctime?: number; mtime?: number } {
 }
 
 /**
+ * Return the recorded disk hash without reopening the file when its cheap
+ * metadata proves that it is still the same file we recorded.
+ */
+function unchangedRecordedHash(
+  record: SyncRecord | undefined,
+  size: number,
+  mtime: number,
+): string | null | undefined {
+  if (!record || record.size !== size || record.mtime !== mtime) return undefined;
+  return record.diskHash;
+}
+
+/**
  * Push: make the layer match the vault.
  *
  * Refuses to tombstone more than half of a vault of 20+ files — an Obsidian
@@ -408,9 +445,10 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   const seen = new Set<string>();
   let done = 0;
 
+  const total = files.length + configPaths.length;
   for (const file of files) {
     done += 1;
-    onProgress(done, files.length, file.path);
+    onProgress(done, total, file.path);
     seen.add(file.path);
 
     try {
@@ -477,6 +515,8 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   // The config directory — plugins, themes, hotkeys. Separate loop because
   // these are invisible to the vault API and have to go through the adapter.
   for (const path of configPaths) {
+    done += 1;
+    onProgress(done, total, path);
     seen.add(path);
     try {
       const info = await statConfigFile(app, path);
@@ -542,14 +582,28 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   }
 
   // Anything the layer still calls live but the vault no longer has.
-  const gone = remote.filter((r) => !r.deleted_at && !seen.has(r.source_ref));
-  const liveCount = remote.filter((r) => !r.deleted_at).length;
+  // An ignored path is outside this device's policy, not deleted. In
+  // particular, turning config sync off must never erase the server's copy of
+  // every plugin and preference because `listConfigFiles` returned none.
+  const managedRemote = remote.filter((row) =>
+    isManagedRemoteDocument(app.vault.configDir, row, {
+      config: configOpts,
+      attachments: options.attachments ?? "all",
+      attachmentLimitBytes: options.attachmentLimitBytes ?? Number.POSITIVE_INFINITY,
+    }),
+  );
+  const gone =
+    options.deleteRemoteMissing === false
+      ? []
+      : managedRemote.filter((row) => !seen.has(row.source_ref));
+  const liveCount = managedRemote.length;
   if (liveCount >= 20 && gone.length / liveCount > 0.5) {
     log(
       `Refusing to delete ${gone.length} of ${liveCount} files — the vault only read as ` +
         `${files.length} files. That usually means Obsidian has not finished loading, not that ` +
         `you deleted everything.`,
     );
+    await options.saveState(state);
     return result;
   }
 
@@ -587,6 +641,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // Metadata only — see client.listDocumentsMeta for why this matters. Bodies
   // are fetched below, for the short list that is actually going to be written.
   const fetched = await client.listDocumentsMeta();
+  const configOpts = options.config ?? { enabled: false, includeCaches: false };
 
   // Two phases: everything that makes the vault WORK, then the heavy files.
   //
@@ -602,14 +657,48 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // arrived yet still opens fine.
   const isHeavy = (r: DocumentRow) => r.kind === "attachment";
   const only = options.only;
-  const wanted = fetched.filter((r) =>
-    only === "text" ? !isHeavy(r) : only === "attachments" ? isHeavy(r) : true,
+  const wanted = fetched.filter(
+    (row) =>
+      isManagedRemotePath(app.vault.configDir, row.source_ref, configOpts) &&
+      (only === "text" ? !isHeavy(row) : only === "attachments" ? isHeavy(row) : true),
   );
   const rows = [
     ...wanted.filter((r) => !isHeavy(r)).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
     ...wanted.filter(isHeavy).sort((a, b) => (a.byte_size ?? 0) - (b.byte_size ?? 0)),
   ];
   const noteCount = wanted.filter((r) => !isHeavy(r)).length;
+
+  // A notes-first restore deliberately leaves the heavy half for the next
+  // pass. Report that work as outstanding instead of claiming the vault is
+  // already complete. A cheap saved-state check avoids counting attachments
+  // that this device already has byte-for-byte.
+  if (only === "text") {
+    for (const row of fetched) {
+      if (
+        row.deleted_at ||
+        !isHeavy(row) ||
+        !isManagedRemotePath(app.vault.configDir, row.source_ref, configOpts)
+      ) {
+        continue;
+      }
+      if (isConfigPath(app, row.source_ref)) {
+        const info = await statConfigFile(app, row.source_ref);
+        const known = info
+          ? unchangedRecordedHash(state[row.source_ref], info.size, info.mtime)
+          : undefined;
+        if (known === row.content_hash) continue;
+      } else {
+        const existing = app.vault.getAbstractFileByPath(normalizePath(row.source_ref));
+        const file = existing instanceof TFileClass ? existing : null;
+        const known = file
+          ? unchangedRecordedHash(state[row.source_ref], file.stat.size, file.stat.mtime)
+          : undefined;
+        if (known === row.content_hash) continue;
+      }
+      result.outstanding += 1;
+      result.outstandingBytes += row.byte_size ?? 0;
+    }
+  }
   // Work out the short list before fetching any text: only notes whose content
   // differs from what is on disk need their body at all, and on a settled vault
   // that is almost none of them.
@@ -623,7 +712,12 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     let onDisk: string | null = null;
     if (file) {
       try {
-        onDisk = await sha256(await app.vault.read(file));
+        const known = unchangedRecordedHash(
+          state[row.source_ref],
+          file.stat.size,
+          file.stat.mtime,
+        );
+        onDisk = known === undefined ? await sha256(await app.vault.read(file)) : known;
       } catch {
         onDisk = null;
       }
@@ -631,9 +725,13 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
       const info = await statConfigFile(app, row.source_ref);
       if (info) {
         try {
-          onDisk = info.binary
-            ? await sha256(await readConfigBinary(app, row.source_ref))
-            : await sha256(await readConfigText(app, row.source_ref));
+          const known = unchangedRecordedHash(state[row.source_ref], info.size, info.mtime);
+          onDisk =
+            known === undefined
+              ? info.binary
+                ? await sha256(await readConfigBinary(app, row.source_ref))
+                : await sha256(await readConfigText(app, row.source_ref))
+              : known;
         } catch {
           onDisk = null;
         }
@@ -644,6 +742,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     }
   }
 
+  const missingBodyIds = new Set<string>();
   if (needsBody.length > 0) {
     // Your notes before plugin code. All 447 notes weigh 2.5 MB between them;
     // the config text is 30 MB of plugin JavaScript. Fetching them in one
@@ -661,6 +760,9 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     const bodies = await client.getDocumentBodies(needsBody, (fetched, total) => {
       onProgress(0, 1, `fetching text — ${fetched} of ${total}`);
     });
+    for (const item of needsBody) {
+      if (!bodies.has(item.id)) missingBodyIds.add(item.id);
+    }
     for (const row of rows) {
       const body = bodies.get(row.id);
       if (body) {
@@ -693,8 +795,6 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
         : row.source_ref) + (remaining > 5_000_000 ? ` · ${mb(remaining)} left` : ""),
     );
 
-    const configOpts = options.config ?? { enabled: false, includeCaches: false };
-
     // Config files take a completely different route: the vault API cannot see
     // or write inside `.obsidian`, so they are read, hashed and written through
     // the adapter. The permission check runs on the way DOWN as well as up,
@@ -707,11 +807,16 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
       }
       try {
         const info = await statConfigFile(app, row.source_ref);
+        const known = info
+          ? unchangedRecordedHash(state[row.source_ref], info.size, info.mtime)
+          : undefined;
         const onDiskHash = !info
           ? null
-          : info.binary
-            ? await sha256(await readConfigBinary(app, row.source_ref))
-            : await sha256(await readConfigText(app, row.source_ref));
+          : known !== undefined
+            ? known
+            : info.binary
+              ? await sha256(await readConfigBinary(app, row.source_ref))
+              : await sha256(await readConfigText(app, row.source_ref));
 
         const { action } = decide({ row, onDisk: onDiskHash, record: state[row.source_ref] });
         if (action === "none") {
@@ -726,11 +831,20 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
           }
           continue;
         }
-        // A conflicting config file is not worth a "(conflict)" twin sitting in
-        // a plugin folder where Obsidian may try to load it. Newest wins here,
-        // and the file is small enough that nothing meaningful is lost.
-        if (row.kind === "attachment" && row.storage_path) {
-          const fetched = await client.getObject(row.storage_path);
+        // Never put a conflict twin inside a plugin/theme directory where
+        // Obsidian could try to load it. Preserve the local version in a normal
+        // vault folder, then apply the shared version at its real config path.
+        if (action === "conflict" && info) {
+          const savedAs = await backUpConfigConflict(app, row.source_ref, info);
+          result.conflicts.push({ path: row.source_ref, savedAs });
+        }
+        if (row.kind === "attachment" && !row.storage_path) {
+          throw new Error(`the server row for ${row.source_ref} has no attachment object path`);
+        }
+        if (row.kind === "attachment") {
+          const storagePath = row.storage_path;
+          if (!storagePath) throw new Error(`the server row for ${row.source_ref} has no attachment object path`);
+          const fetched = await client.getObject(storagePath);
           await writeConfigBinary(
             app,
             row.source_ref,
@@ -738,7 +852,16 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
             timesFor(row),
           );
         } else {
-          await writeConfigText(app, row.source_ref, row.raw ?? row.body ?? "", timesFor(row));
+          if (missingBodyIds.has(row.id)) {
+            throw new Error(`the server did not return the text requested for ${row.source_ref}`);
+          }
+          const text = renderNote(row);
+          await verifiedBytes(
+            new TextEncoder().encode(text).buffer,
+            row.content_hash,
+            row.source_ref,
+          );
+          await writeConfigText(app, row.source_ref, text, timesFor(row));
         }
         const after = await statConfigFile(app, row.source_ref);
         state[row.source_ref] = {
@@ -759,17 +882,6 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
 
     if (isExcluded(row.source_ref)) continue;
 
-    // Attachment policy, applied before any network call: a file we are not
-    // going to keep should cost nothing at all, not a download we then discard.
-    if (row.kind === "attachment") {
-      const policy = options.attachments ?? "all";
-      const limit = options.attachmentLimitBytes ?? Number.POSITIVE_INFINITY;
-      if (policy === "none" || (policy === "under-limit" && (row.byte_size ?? 0) > limit)) {
-        result.skipped += 1;
-        continue;
-      }
-    }
-
     const path = normalizePath(row.source_ref);
     const existing = app.vault.getAbstractFileByPath(path);
     const file = existing instanceof TFileClass ? existing : null;
@@ -777,14 +889,36 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
     let onDisk: string | null = null;
     if (file) {
       try {
-        onDisk = isMarkdown(path)
-          ? await sha256(await app.vault.read(file))
-          : await sha256(await app.vault.readBinary(file));
+        const known = unchangedRecordedHash(
+          state[row.source_ref],
+          file.stat.size,
+          file.stat.mtime,
+        );
+        onDisk =
+          known !== undefined
+            ? known
+            : isMarkdown(path)
+              ? await sha256(await app.vault.read(file))
+              : await sha256(await app.vault.readBinary(file));
       } catch (error) {
         result.failed.push({
           path: row.source_ref,
           reason: error instanceof Error ? error.message : String(error),
         });
+        continue;
+      }
+    }
+
+    // Attachment policy, applied before any network call. Already-present
+    // attachments still count as unchanged; only content this device genuinely
+    // lacks is reported as skipped/outstanding.
+    if (row.kind === "attachment" && !row.deleted_at && onDisk !== row.content_hash) {
+      const policy = options.attachments ?? "all";
+      const limit = options.attachmentLimitBytes ?? Number.POSITIVE_INFINITY;
+      if (policy === "none" || (policy === "under-limit" && (row.byte_size ?? 0) > limit)) {
+        result.skipped += 1;
+        result.outstanding += 1;
+        result.outstandingBytes += row.byte_size ?? 0;
         continue;
       }
     }
@@ -808,10 +942,19 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
         continue;
       }
 
+      if (row.kind !== "attachment" && missingBodyIds.has(row.id)) {
+        throw new Error(`the server did not return the text requested for ${row.source_ref}`);
+      }
+
+      if (row.kind === "attachment" && !row.storage_path) {
+        throw new Error(`the server row for ${row.source_ref} has no attachment object path`);
+      }
+      const storagePath = row.storage_path;
+
       const bytes =
-        row.kind === "attachment" && row.storage_path
+        row.kind === "attachment"
           ? await verifiedBytes(
-              await client.getObject(row.storage_path, (received, total) => {
+              await client.getObject(storagePath!, (received, total) => {
                 // Big files are the ones that look frozen, so say how far in
                 // we are. Small ones would just flicker.
                 if ((total ?? row.byte_size ?? 0) > 2_000_000) {
@@ -821,7 +964,11 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
               row.content_hash,
               row.source_ref,
             )
-          : new TextEncoder().encode(renderNote(row)).buffer;
+          : await verifiedBytes(
+              new TextEncoder().encode(renderNote(row)).buffer,
+              row.content_hash,
+              row.source_ref,
+            );
 
       const target = action === "conflict" ? normalizePath(conflictName(row.source_ref, new Date().toISOString())) : path;
 
@@ -846,9 +993,13 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
         // this one just protected.
       } else {
         result.downloaded += 1;
+        const written = app.vault.getAbstractFileByPath(target);
+        const writtenFile = written instanceof TFileClass ? written : null;
         state[row.source_ref] = {
           layerHash: row.content_hash ?? null,
           diskHash: await sha256(bytes),
+          size: writtenFile?.stat.size,
+          mtime: writtenFile?.stat.mtime,
           at: new Date().toISOString(),
         };
       }
@@ -980,9 +1131,11 @@ export async function repairDates(options: EngineOptions): Promise<{ checked: nu
 
       // Within a second is close enough; rewriting every file to correct a few
       // milliseconds would be churn for nothing.
-      const closeEnough =
-        times.ctime !== undefined && Math.abs(file.stat.ctime - times.ctime) < 1000;
-      if (closeEnough) continue;
+      const ctimeMatches =
+        times.ctime === undefined || Math.abs(file.stat.ctime - times.ctime) < 1000;
+      const mtimeMatches =
+        times.mtime === undefined || Math.abs(file.stat.mtime - times.mtime) < 1000;
+      if (ctimeMatches && mtimeMatches) continue;
 
       if (row.kind === "attachment") {
         await app.vault.modifyBinary(file, await app.vault.readBinary(file), times);

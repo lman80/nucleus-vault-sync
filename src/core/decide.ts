@@ -46,7 +46,9 @@ import type { DecideInput, DecideResult, RenderableNote } from "./types";
  * path where formatting could drift from what a human would have typed.
  */
 export function renderNote(row: RenderableNote): string {
-  if (typeof row.raw === "string" && row.raw.length > 0) return row.raw;
+  // An empty string is still exact source text. Falling through to a stale
+  // derived `body` would turn an intentionally empty file into old content.
+  if (typeof row.raw === "string") return row.raw;
   const body = row.body ?? "";
   if (!row.frontmatter || Object.keys(row.frontmatter).length === 0) return body;
   // Only re-emit frontmatter this tool can round-trip losslessly. Anything

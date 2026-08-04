@@ -1,8 +1,8 @@
 {
   "name": "obsidian-nucleus-plugin",
-  "version": "0.1.0",
+  "version": "0.13.0",
   "description": "Sync an Obsidian vault with your own Nucleus data layer, on desktop and mobile.",
-  "main": "index.js",
+  "main": "main.js",
   "scripts": {
     "dev": "node esbuild.config.mjs",
     "build": "npm run typecheck && node esbuild.config.mjs production",

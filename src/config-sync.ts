@@ -65,8 +65,9 @@ export function configDir(app: App): string {
  * Every file under the config directory, as vault-relative paths.
  *
  * Walks with `adapter.list`, which is the only thing that can see in here.
- * A directory that cannot be read is skipped rather than aborting the walk —
- * one unreadable plugin folder must not stop the other twenty-nine syncing.
+ * A directory that cannot be read aborts this pass. Silently skipping it would
+ * make the push side interpret every file below it as deleted and tombstone a
+ * perfectly good remote plugin. The next automatic pass will retry.
  */
 export async function listConfigFiles(app: App, options: ConfigSyncOptions): Promise<string[]> {
   if (!options.enabled) return [];
@@ -77,8 +78,10 @@ export async function listConfigFiles(app: App, options: ConfigSyncOptions): Pro
     let listing: { files: string[]; folders: string[] };
     try {
       listing = await app.vault.adapter.list(normalizePath(dir));
-    } catch {
-      return;
+    } catch (error) {
+      throw new Error(
+        `could not list ${dir}: ${error instanceof Error ? error.message : String(error)}`,
+      );
     }
     for (const file of listing.files) {
       const relative = file.slice(root.length + 1);

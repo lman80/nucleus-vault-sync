@@ -28,6 +28,7 @@ import { NucleusClient } from "./client";
 import { pull, push, syncBothWays, setAside, replaceLocal, verifyAndRepair, repairDates, isExcluded, type PassResult } from "./engine";
 import { OnboardingModal, SET_ASIDE_FOLDER, type MergeChoice, type Situation } from "./onboarding";
 import { DEFAULT_SETTINGS, NucleusSettingTab, type NucleusSettings } from "./settings";
+import { listConfigFiles, statConfigFile } from "./config-sync";
 
 export default class NucleusSyncPlugin extends Plugin {
   settings: NucleusSettings = { ...DEFAULT_SETTINGS };
@@ -54,6 +55,14 @@ export default class NucleusSyncPlugin extends Plugin {
   private lastSyncAt: Date | null = null;
   private outstanding = 0;
   private outstandingBytes = 0;
+  private liveTimer: number | null = null;
+  private periodicTimer: number | null = null;
+  private configTimer: number | null = null;
+  private configSnapshot: string | null = null;
+  /** Server + vault that the in-memory reconciliation record belongs to. */
+  private stateContext = "";
+  /** A vault event arrived while a pass was suppressing its own writes. */
+  private pendingLocalChange = false;
 
   async onload(): Promise<void> {
     await this.loadSettings();
@@ -105,6 +114,7 @@ export default class NucleusSyncPlugin extends Plugin {
     this.app.workspace.onLayoutReady(() => {
       this.registerChangeHandlers();
       this.rescheduleTimer();
+      void this.captureConfigSnapshot();
 
       if (!this.settings.onboarded) {
         this.openOnboarding();
@@ -112,6 +122,10 @@ export default class NucleusSyncPlugin extends Plugin {
         void this.syncNow({ quiet: true });
       }
     });
+  }
+
+  onunload(): void {
+    this.clearTimers();
   }
 
   get configured(): boolean {
@@ -214,11 +228,31 @@ export default class NucleusSyncPlugin extends Plugin {
     const stored = (await this.loadData()) as Partial<NucleusSettings> | null;
     this.settings = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
     if (!this.settings.vaultName) this.settings.vaultName = this.app.vault.getName();
+    if (
+      !this.settings.state ||
+      typeof this.settings.state !== "object" ||
+      Array.isArray(this.settings.state)
+    ) {
+      this.settings.state = {};
+    }
+    this.stateContext = this.connectionContext();
   }
 
   async saveSettings(): Promise<void> {
+    const nextContext = this.connectionContext();
+    if (this.stateContext && nextContext !== this.stateContext) {
+      // A sync record is meaningful only for the exact server/vault pair that
+      // produced it. Reusing it after switching vaults can turn unrelated
+      // hashes into false agreement and make conflict decisions unsafe.
+      this.settings.state = {};
+    }
+    this.stateContext = nextContext;
     await this.saveData(this.settings);
     this.client = null; // rebuilt on next use, so a changed key takes effect at once
+  }
+
+  private connectionContext(): string {
+    return `${this.settings.url.trim().replace(/\/+$/, "")}\n${this.settings.vaultName.trim()}`;
   }
 
   /** Persist just the per-file sync record, without disturbing anything else. */
@@ -268,6 +302,10 @@ export default class NucleusSyncPlugin extends Plugin {
         key: this.settings.key,
         vaultName: this.settings.vaultName || this.app.vault.getName(),
       },
+      config: {
+        enabled: this.settings.syncConfig,
+        includeCaches: this.settings.syncPluginCaches,
+      },
       makeClient: (url, key, vaultName) => this.makeClient(url, key, vaultName),
       onConnect: async (url, key, vaultName) => {
         const result = await this.makeClient(url, key, vaultName).testConnection();
@@ -281,6 +319,7 @@ export default class NucleusSyncPlugin extends Plugin {
       },
       onRun: async (situation: Situation, mergeChoice: MergeChoice, report) => {
         const options = this.engineOptions(report);
+        this.syncing = true;
         this.applyingRemote = true;
         try {
           let pulled: PassResult | null = null;
@@ -288,7 +327,12 @@ export default class NucleusSyncPlugin extends Plugin {
 
           let movedAside = 0;
 
-          if (situation === "restore") {
+          if (situation === "fresh") {
+            // There may truly be nothing to transfer, but running a harmless
+            // push also establishes state for any config file created between
+            // the survey and this click.
+            pushed = await push(options);
+          } else if (situation === "restore") {
             // Only the part that makes the vault usable. The attachments —
             // which for this vault are 1.4 GB of video and none of the urgency —
             // continue after the dialog closes. Blocking setup on them meant
@@ -314,12 +358,14 @@ export default class NucleusSyncPlugin extends Plugin {
             const aside = await setAside(this.app, SET_ASIDE_FOLDER, report);
             movedAside = aside.moved;
             pulled = await pull({ ...options, only: "text" });
-            pushed = await push(options);
+            // Attachments are intentionally still remote-only at this point;
+            // absence during a notes-first restore must not delete them.
+            pushed = await push({ ...options, deleteRemoteMissing: false });
             this.finishAttachmentsInBackground();
           } else if (mergeChoice === "upload-mine") {
             // Local wins: send everything up first, so anything that differs is
             // resolved in the vault's favour, then bring down what is missing.
-            pushed = await push(options);
+            pushed = await push({ ...options, deleteRemoteMissing: false });
             pulled = await pull(options);
           } else {
             const both = await syncBothWays(options);
@@ -329,6 +375,7 @@ export default class NucleusSyncPlugin extends Plugin {
 
           this.settings.onboarded = true;
           await this.saveSettings();
+          await this.captureConfigSnapshot(true);
 
           const parts: string[] = [];
           if (movedAside) parts.push(`${movedAside} moved into "${SET_ASIDE_FOLDER}"`);
@@ -338,7 +385,11 @@ export default class NucleusSyncPlugin extends Plugin {
           if (pushed?.tombstoned) parts.push(`${pushed.tombstoned} marked deleted`);
           if (!parts.length) parts.push("everything already matched");
           // Do not claim completeness while the heavy half is still queued.
-          if (situation === "restore" || mergeChoice === "replace" || mergeChoice === "set-aside") {
+          if (
+            situation === "restore" ||
+            (situation === "merge" &&
+              (mergeChoice === "replace" || mergeChoice === "set-aside"))
+          ) {
             parts.push("attachments continue in the background");
           }
 
@@ -349,7 +400,9 @@ export default class NucleusSyncPlugin extends Plugin {
             failed: (pulled?.failed.length ?? 0) + (pushed?.failed.length ?? 0),
           };
         } finally {
+          this.syncing = false;
           this.applyingRemote = false;
+          this.flushPendingLocalChange();
         }
       },
     }).open();
@@ -365,7 +418,12 @@ export default class NucleusSyncPlugin extends Plugin {
   private finishAttachmentsInBackground(): void {
     window.setTimeout(() => {
       void (async () => {
-        if (this.syncing) return;
+        if (this.syncing) {
+          // Setup may still be checkpointing its notes-first pass. Try again
+          // instead of silently dropping the promised attachment continuation.
+          this.finishAttachmentsInBackground();
+          return;
+        }
         this.syncing = true;
         this.applyingRemote = true;
         try {
@@ -377,6 +435,10 @@ export default class NucleusSyncPlugin extends Plugin {
         } finally {
           this.syncing = false;
           this.applyingRemote = false;
+          await this.captureConfigSnapshot(true);
+          this.liveNotice?.hide();
+          this.liveNotice = null;
+          this.flushPendingLocalChange();
         }
       })();
     }, 1500);
@@ -390,13 +452,17 @@ export default class NucleusSyncPlugin extends Plugin {
     try {
       const options = this.engineOptions();
       const result = direction === "pull" ? await pull(options) : await push(options);
+      await this.captureConfigSnapshot(true);
       this.announce(direction === "pull" ? result : null, direction === "push" ? result : null);
     } catch (error) {
-      new Notice(`Nucleus: ${error instanceof Error ? error.message : String(error)}`);
-      this.setStatus("Nucleus: last sync failed");
+      const message = error instanceof Error ? error.message : String(error);
+      this.lastError = message;
+      new Notice(`Nucleus: ${message}`);
+      this.setStatus("Nucleus: last sync failed — click for why");
     } finally {
       this.syncing = false;
       this.applyingRemote = false;
+      this.flushPendingLocalChange();
     }
   }
 
@@ -420,6 +486,7 @@ export default class NucleusSyncPlugin extends Plugin {
       this.syncing = false;
       this.applyingRemote = false;
       this.setStatus("Nucleus: ready");
+      this.flushPendingLocalChange();
     }
   }
 
@@ -443,6 +510,7 @@ export default class NucleusSyncPlugin extends Plugin {
     } finally {
       this.syncing = false;
       this.applyingRemote = false;
+      this.flushPendingLocalChange();
     }
     await this.syncNow();
   }
@@ -458,6 +526,7 @@ export default class NucleusSyncPlugin extends Plugin {
       // Our own writes moved the watermark; record it so the watcher does not
       // immediately see them as somebody else's news.
       this.lastSeenChange = await this.getClient().latestChange().catch(() => this.lastSeenChange);
+      await this.captureConfigSnapshot(true);
       this.announce(pulled, pushed, quiet);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -473,6 +542,7 @@ export default class NucleusSyncPlugin extends Plugin {
       this.applyingRemote = false;
       this.liveNotice?.hide();
       this.liveNotice = null;
+      this.flushPendingLocalChange();
     }
   }
 
@@ -494,7 +564,7 @@ export default class NucleusSyncPlugin extends Plugin {
     if (pushed?.uploaded) bits.push(`${pushed.uploaded} up`);
     if (pulled?.deletedLocally) bits.push(`${pulled.deletedLocally} removed here`);
     if (pushed?.tombstoned) bits.push(`${pushed.tombstoned} deleted`);
-    if (pulled?.skipped) bits.push(`${pulled.skipped} big files skipped`);
+    if (pulled?.skipped) bits.push(`${pulled.skipped} files skipped by this device's settings`);
 
     this.lastSyncAt = new Date();
     this.outstanding = pulled?.outstanding ?? 0;
@@ -515,7 +585,7 @@ export default class NucleusSyncPlugin extends Plugin {
     // silently duplicated note is exactly the thing a person needs told.
     if (conflicts) {
       new Notice(
-        `Nucleus kept both versions of ${conflicts} file(s). Yours were not changed — look for “(conflict …)”.`,
+        `Nucleus kept both versions of ${conflicts} file(s). Note conflicts are beside the original; settings/plugin conflicts are in “Nucleus Config Conflicts”.`,
         8000,
       );
     }
@@ -529,6 +599,7 @@ export default class NucleusSyncPlugin extends Plugin {
         15000,
       );
       this.lastError = names;
+      this.setStatus("Nucleus: incomplete — click for details");
     }
     if (!quiet && !conflicts && !failed) {
       new Notice(
@@ -559,7 +630,13 @@ export default class NucleusSyncPlugin extends Plugin {
     );
 
     const onChange = (file: unknown) => {
-      if (this.applyingRemote) return;
+      if (this.applyingRemote) {
+        // Most of these are our own pull writes, but one may be the user editing
+        // during a long attachment transfer. A single cheap follow-up pass is
+        // preferable to silently losing that event.
+        this.pendingLocalChange = true;
+        return;
+      }
       if (file instanceof TFile && isExcluded(file.path)) return;
       schedule();
     };
@@ -568,6 +645,18 @@ export default class NucleusSyncPlugin extends Plugin {
     this.registerEvent(this.app.vault.on("modify", onChange));
     this.registerEvent(this.app.vault.on("delete", onChange));
     this.registerEvent(this.app.vault.on("rename", onChange));
+  }
+
+  private flushPendingLocalChange(): void {
+    if (!this.pendingLocalChange) return;
+    this.pendingLocalChange = false;
+    window.setTimeout(() => {
+      if (this.syncing || this.applyingRemote) {
+        this.pendingLocalChange = true;
+        return;
+      }
+      if (this.configured) void this.syncNow({ quiet: true });
+    }, 250);
   }
 
   /**
@@ -587,20 +676,85 @@ export default class NucleusSyncPlugin extends Plugin {
    * suspends the app — so this catches up on return rather than running there.
    */
   rescheduleTimer(): void {
+    this.clearTimers();
+
     if (this.settings.liveSync) {
       const seconds = Math.max(2, this.settings.liveIntervalSeconds || 5);
-      this.registerInterval(
-        window.setInterval(() => void this.checkForRemoteChanges(), seconds * 1000),
+      this.liveTimer = window.setInterval(
+        () => void this.checkForRemoteChanges(),
+        seconds * 1000,
+      );
+    }
+
+    // Hidden config files do not emit Vault create/modify events. A cheap
+    // path/size/mtime snapshot supplies the missing watcher so plugin settings,
+    // themes, hotkeys, and add-ons travel soon after they change too.
+    if (this.settings.syncConfig) {
+      this.configTimer = window.setInterval(
+        () => void this.checkForLocalConfigChanges(),
+        10_000,
       );
     }
 
     const minutes = this.settings.syncEveryMinutes;
     if (!minutes || minutes <= 0) return;
-    this.registerInterval(
-      window.setInterval(() => {
+    this.periodicTimer = window.setInterval(() => {
         if (this.configured && !this.syncing) void this.syncNow({ quiet: true });
-      }, minutes * 60_000),
-    );
+      }, minutes * 60_000);
+  }
+
+  private clearTimers(): void {
+    if (this.liveTimer !== null) window.clearInterval(this.liveTimer);
+    if (this.periodicTimer !== null) window.clearInterval(this.periodicTimer);
+    if (this.configTimer !== null) window.clearInterval(this.configTimer);
+    this.liveTimer = null;
+    this.periodicTimer = null;
+    this.configTimer = null;
+  }
+
+  private async configFingerprint(): Promise<string> {
+    if (!this.settings.syncConfig) return "off";
+    const options = {
+      enabled: true,
+      includeCaches: this.settings.syncPluginCaches,
+    };
+    const paths = await listConfigFiles(this.app, options);
+    const parts: string[] = [];
+    for (const path of paths) {
+      const info = await statConfigFile(this.app, path);
+      if (info) parts.push(`${path}\u0000${info.size}\u0000${info.mtime}`);
+    }
+    return parts.join("\n");
+  }
+
+  private async captureConfigSnapshot(scheduleIfChanged = false): Promise<void> {
+    try {
+      const previous = this.configSnapshot;
+      const next = await this.configFingerprint();
+      this.configSnapshot = next;
+      if (scheduleIfChanged && previous !== null && previous !== next) {
+        this.pendingLocalChange = true;
+      }
+    } catch {
+      // A transient unreadable plugin folder will be retried by the timer.
+    }
+  }
+
+  private async checkForLocalConfigChanges(): Promise<void> {
+    if (!this.configured || this.syncing || this.applyingRemote || !this.settings.syncConfig) return;
+    try {
+      const next = await this.configFingerprint();
+      if (this.configSnapshot === null) {
+        this.configSnapshot = next;
+        return;
+      }
+      if (next === this.configSnapshot) return;
+      this.configSnapshot = next;
+      await this.syncNow({ quiet: true });
+    } catch {
+      // The next poll retries. A config watcher should not spam notices merely
+      // because one plugin was replacing a file at the instant we listed it.
+    }
   }
 
   /** One cheap question: has anything in this vault changed since we last looked? */
@@ -609,11 +763,11 @@ export default class NucleusSyncPlugin extends Plugin {
     try {
       const latest = await this.getClient().latestChange();
       if (latest === this.lastSeenChange) return;
-      // First run just records where we are; syncing on it would fire a full
-      // pass every time Obsidian opens, which startup sync already covers.
-      const firstLook = this.lastSeenChange === null;
       this.lastSeenChange = latest;
-      if (!firstLook) await this.syncNow({ quiet: true });
+      // Do not discard the first observation. Startup sync is optional, and if
+      // it is disabled this may be the only chance to fetch edits made while
+      // Obsidian was closed.
+      if (latest !== null) await this.syncNow({ quiet: true });
     } catch {
       // A failed check is not worth telling anyone about — the next one is a
       // few seconds away, and a notice every five seconds on a flaky

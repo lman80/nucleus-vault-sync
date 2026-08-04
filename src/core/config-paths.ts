@@ -27,6 +27,12 @@ export interface ConfigSyncOptions {
   includeCaches: boolean;
 }
 
+/** A server-provided path must stay vault-relative after normalisation. */
+export function isSafeSyncPath(path: string): boolean {
+  if (!path || path.startsWith("/") || path.includes("\\") || path.includes("\0")) return false;
+  return path.split("/").every((part) => part.length > 0 && part !== "." && part !== "..");
+}
+
 /**
  * `relative` is the path WITHIN the config directory.
  *
@@ -53,7 +59,7 @@ export function isExcludedConfigPath(relative: string, options: ConfigSyncOption
 
 /** True when `path` is inside `configDir`. `.obsidian-backup` is NOT `.obsidian`. */
 export function isConfigPath(configDir: string, path: string): boolean {
-  return path === configDir || path.startsWith(`${configDir}/`);
+  return isSafeSyncPath(path) && (path === configDir || path.startsWith(`${configDir}/`));
 }
 
 /**
@@ -69,6 +75,7 @@ export function mayWriteConfigPath(
   options: ConfigSyncOptions,
 ): boolean {
   if (!options.enabled) return false;
+  if (!isSafeSyncPath(path)) return false;
   if (!path.startsWith(`${configDir}/`)) return false;
   return !isExcludedConfigPath(path.slice(configDir.length + 1), options);
 }

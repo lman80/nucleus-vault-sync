@@ -22,6 +22,7 @@ import { App, Modal, Notice, Setting } from "obsidian";
 
 import type { NucleusClient } from "./client";
 import { vaultFiles } from "./engine";
+import { listConfigFiles, type ConfigSyncOptions } from "./config-sync";
 
 export type Situation = "fresh" | "upload" | "restore" | "merge";
 
@@ -38,8 +39,15 @@ export interface Survey {
 }
 
 /** Look at both sides and work out where we are. No side effects. */
-export async function survey(app: App, client: NucleusClient): Promise<Survey> {
-  const local = vaultFiles(app).length;
+export async function survey(
+  app: App,
+  client: NucleusClient,
+  config: ConfigSyncOptions = { enabled: true, includeCaches: false },
+): Promise<Survey> {
+  // A vault with no notes can still contain its entire Obsidian setup. Treating
+  // that as empty made first setup do nothing and left plugins/preferences
+  // waiting for a later timer.
+  const local = vaultFiles(app).length + (await listConfigFiles(app, config)).length;
   const rows = await client.listDocumentsSlim();
   const remote = rows.filter((r) => !r.deleted_at).length;
 
@@ -110,6 +118,7 @@ interface WizardCallbacks {
   ) => Promise<{ summary: string; conflicts: number; failed: number }>;
   makeClient: (url: string, key: string, vaultName: string) => NucleusClient;
   defaults: { url: string; key: string; vaultName: string };
+  config: ConfigSyncOptions;
 }
 
 /**
@@ -354,7 +363,11 @@ export class OnboardingModal extends Modal {
     el.createEl("p", { text: `Comparing this folder with "${name}".` });
     try {
       await this.cb.onConnect(this.url, this.key, this.vaultName);
-      this.surveyed = await survey(this.app, this.cb.makeClient(this.url, this.key, this.vaultName));
+      this.surveyed = await survey(
+        this.app,
+        this.cb.makeClient(this.url, this.key, this.vaultName),
+        this.cb.config,
+      );
       this.renderConfirm();
     } catch (error) {
       el.createEl("p", { text: error instanceof Error ? error.message : String(error) });
@@ -475,8 +488,9 @@ export class OnboardingModal extends Modal {
           .setCta()
           .onClick(() => {
             if (this.surveyed!.situation === "fresh") {
-              new Notice("Nucleus sync is set up.");
-              this.close();
+              // Still run the callback: it persists `onboarded`, so an empty
+              // vault does not reopen this wizard on every launch.
+              void this.renderRun();
               return;
             }
             if (this.surveyed!.situation === "merge") {
@@ -505,18 +519,25 @@ export class OnboardingModal extends Modal {
       el.empty();
       el.createEl("h2", { text: "Your vault is ready" });
       el.createEl("p", { text: outcome.summary });
-      el.createEl("p", {
-        text:
-          "Attachments — images and video — keep downloading in the background. " +
-          "You can close this and start using your notes now; the status bar at the " +
-          "bottom shows how much is left.",
-      });
+      const backgroundAttachments =
+        this.surveyed!.situation === "restore" ||
+        (this.surveyed!.situation === "merge" &&
+          (this.mergeChoice === "replace" || this.mergeChoice === "set-aside"));
+      if (backgroundAttachments) {
+        el.createEl("p", {
+          text:
+            "Attachments — images and video — keep downloading in the background. " +
+            "You can close this and start using your notes now; the status bar at the " +
+            "bottom shows how much is left.",
+        });
+      }
 
       if (outcome.conflicts > 0) {
         el.createEl("p", {
           text:
-            `${outcome.conflicts} file(s) differed on both sides. Yours were left exactly as they were, ` +
-            `and the Nucleus versions are saved beside them with “(conflict …)” in the name.`,
+            `${outcome.conflicts} file(s) differed on both sides. Both versions were kept. ` +
+            `Note conflicts are beside the original; settings/plugin conflicts are backed up in ` +
+            `“Nucleus Config Conflicts” so Obsidian cannot accidentally load both.`,
         });
       }
       if (outcome.failed > 0) {

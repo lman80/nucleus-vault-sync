@@ -129,3 +129,7 @@ test("renderNote: frontmatter round-trips in Obsidian's shape", () => {
 test("renderNote: an empty frontmatter object emits no block", () => {
   assert.equal(renderNote({ body: "x", frontmatter: {} }), "x");
 });
+
+test("renderNote: an exact empty raw file wins over stale derived content", () => {
+  assert.equal(renderNote({ raw: "", body: "old text" }), "");
+});

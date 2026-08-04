@@ -48,15 +48,30 @@ Then copy `main.js`, `manifest.json` and `styles.css` into
 
 **iPhone / iPad:** the Files app cannot see inside `.obsidian`, so put the plugin folder there from a Mac — the same way you would move any file into the vault — and it appears on the phone. Then enable it in Settings.
 
-## What it syncs, and what it does not
+## What it syncs
 
-**Synced:** every note and every attachment — images, PDFs, canvases, video.
+The default is the whole usable vault:
 
-**Not synced, deliberately:**
+- every note, canvas, and attachment — images, PDFs, audio, and video;
+- `.obsidian` preferences, hotkeys, appearance, graph settings, and workspace layouts;
+- installed community plugins and themes, which plugins are enabled, and each plugin's `data.json` settings;
+- CSS snippets and other add-ons stored under the Obsidian config directory.
 
-- `.obsidian/` — your settings, themes, hotkeys and plugin configs. Devices legitimately differ, and syncing this is how you get a phone trying to load a desktop-only plugin.
-- `.trash/` — Obsidian's own deleted-notes folder.
-- Plugin caches (`.smart-env`, `.claude`, `.claudian`) — large, machine-specific, and regenerable.
+The one file that never travels is this plugin's own
+`.obsidian/plugins/nucleus-vault-sync/data.json`. It contains the API key and a
+per-device conflict record; copying either would be unsafe and would make sync
+decisions incorrect. Constantly rewritten plugin caches are off by default, but
+can be included from settings.
+
+`.trash`, `.git`, and machine-specific top-level caches are not treated as vault
+content. They are ignored rather than interpreted as deletions.
+
+Config files live in a hidden folder, so Obsidian does not emit normal vault
+events for them. The plugin watches their path, size, and modified time on a
+short timer and syncs changes automatically. If a plugin or preference changes
+on both devices, both versions are preserved: the shared version is applied and
+the displaced local version is placed under `Nucleus Config Conflicts`, outside
+the live plugin directory.
 
 ## Large files on iPhone
 
@@ -69,6 +84,9 @@ So this plugin uses a **direct connection** for large attachments instead, which
 On startup, a few seconds after you stop typing, and on a timer you choose. All three are optional. There is also a **Sync now** command and a ribbon button.
 
 On iPhone and iPad, **nothing runs while Obsidian is in the background** — iOS suspends the app. Sync resumes when you next open it. Every pass is resumable, so an interrupted one costs nothing.
+
+After plugin code or an enabled-plugin list arrives, Obsidian may require a
+restart before that plugin is loaded. The files themselves are already synced.
 
 ## Your key
 
