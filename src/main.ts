@@ -22,13 +22,13 @@
  * resumable and starts by asking both sides what they have.
  */
 
-import { Notice, Platform, Plugin, TFile, debounce } from "obsidian";
+import { Modal, Notice, Plugin, TFile, debounce, normalizePath } from "obsidian";
 
 import { NucleusClient } from "./client";
 import { pull, push, syncBothWays, setAside, replaceLocal, verifyAndRepair, repairDates, isExcluded, type PassResult } from "./engine";
 import { OnboardingModal, SET_ASIDE_FOLDER, type MergeChoice, type Situation } from "./onboarding";
 import { DEFAULT_SETTINGS, NucleusSettingTab, type NucleusSettings } from "./settings";
-import { listConfigFiles, statConfigFile } from "./config-sync";
+import { listConfigFiles, statConfigFile, OWN_LOG_FILE } from "./config-sync";
 
 export default class NucleusSyncPlugin extends Plugin {
   settings: NucleusSettings = { ...DEFAULT_SETTINGS };
@@ -37,15 +37,8 @@ export default class NucleusSyncPlugin extends Plugin {
   /** True while WE are writing, so our own writes do not trigger another pass. */
   private applyingRemote = false;
   private statusEl: HTMLElement | null = null;
-  /**
-   * A live notice, for phones.
-   *
-   * `addStatusBarItem` does nothing on mobile — there is no status bar — so
-   * every progress line built so far was written somewhere the owner could not
-   * see it. On a phone the same text goes into a notice that stays up and is
-   * rewritten as the sync moves, then closes when it finishes.
-   */
-  private liveNotice: Notice | null = null;
+  /** Serialises device-local JSONL writes so concurrent callbacks cannot race. */
+  private logQueue: Promise<void> = Promise.resolve();
   /** Newest change we have already reacted to, so a poll only acts on news. */
   private lastSeenChange: string | null = null;
   /** What went wrong last, kept so it can be shown rather than only logged. */
@@ -108,6 +101,7 @@ export default class NucleusSyncPlugin extends Plugin {
       name: "How is sync doing?",
       callback: () => new Notice(this.summary(), 15000),
     });
+    this.addCommand({ id: "open-sync-log", name: "Open sync log", callback: () => void this.openSyncLog() });
     this.addCommand({ id: "open-setup", name: "Open setup", callback: () => this.openOnboarding() });
 
     // Everything that depends on the vault being indexed waits for it.
@@ -119,7 +113,7 @@ export default class NucleusSyncPlugin extends Plugin {
       if (!this.settings.onboarded) {
         this.openOnboarding();
       } else if (this.settings.syncOnStartup && this.configured) {
-        void this.syncNow({ quiet: true });
+        void this.syncNow({ quiet: true, reason: "startup" });
       }
     });
   }
@@ -181,23 +175,39 @@ export default class NucleusSyncPlugin extends Plugin {
 
   private setStatus(text: string): void {
     this.statusEl?.setText(text);
+  }
 
-    if (!Platform.isMobileApp) return;
+  private logEvent(event: string, details: Record<string, unknown> = {}): void {
+    const line = JSON.stringify({ at: new Date().toISOString(), event, ...details });
+    const path = normalizePath(`${this.app.vault.configDir}/${OWN_LOG_FILE}`);
+    this.logQueue = this.logQueue.then(async () => {
+      try {
+        let previous = "";
+        if (await this.app.vault.adapter.exists(path)) previous = await this.app.vault.adapter.read(path);
+        // Keep roughly the last 250 KB. The log is diagnostic, not another database.
+        if (previous.length > 250_000) previous = previous.slice(-200_000).replace(/^.*?\n/, "");
+        await this.app.vault.adapter.write(path, `${previous}${line}\n`);
+      } catch (error) {
+        console.warn("[nucleus] could not write sync log", error);
+      }
+    });
+  }
 
-    // Only hold a notice open while something is actually happening; an idle
-    // "up to date" banner that never goes away is its own annoyance.
-    const busy = this.syncing;
-    if (!busy) {
-      this.liveNotice?.hide();
-      this.liveNotice = null;
-      return;
+  async openSyncLog(): Promise<void> {
+    const modal = new Modal(this.app);
+    modal.titleEl.setText("Nucleus sync log");
+    const path = normalizePath(`${this.app.vault.configDir}/${OWN_LOG_FILE}`);
+    let contents = "No activity has been logged yet.";
+    try {
+      if (await this.app.vault.adapter.exists(path)) {
+        const all = await this.app.vault.adapter.read(path);
+        contents = all.trim().split("\n").slice(-200).join("\n") || contents;
+      }
+    } catch (error) {
+      contents = `Could not read the log: ${error instanceof Error ? error.message : String(error)}`;
     }
-    if (!this.liveNotice) {
-      // 0 = stays until hidden.
-      this.liveNotice = new Notice(text, 0);
-    } else {
-      this.liveNotice.setMessage(text);
-    }
+    modal.contentEl.createEl("pre", { text: contents, cls: "nucleus-log" });
+    modal.open();
   }
 
   makeClient(
@@ -273,9 +283,11 @@ export default class NucleusSyncPlugin extends Plugin {
       config: {
         enabled: this.settings.syncConfig,
         includeCaches: this.settings.syncPluginCaches,
+        includeWorkspace: this.settings.syncWorkspace,
       },
       log: (line: string) => {
         console.warn("[nucleus]", line);
+        this.logEvent("engine", { message: line });
         report?.(line);
       },
       onProgress: (done: number, total: number, what: string) => {
@@ -305,6 +317,7 @@ export default class NucleusSyncPlugin extends Plugin {
       config: {
         enabled: this.settings.syncConfig,
         includeCaches: this.settings.syncPluginCaches,
+        includeWorkspace: this.settings.syncWorkspace,
       },
       makeClient: (url, key, vaultName) => this.makeClient(url, key, vaultName),
       onConnect: async (url, key, vaultName) => {
@@ -436,8 +449,6 @@ export default class NucleusSyncPlugin extends Plugin {
           this.syncing = false;
           this.applyingRemote = false;
           await this.captureConfigSnapshot(true);
-          this.liveNotice?.hide();
-          this.liveNotice = null;
           this.flushPendingLocalChange();
         }
       })();
@@ -515,33 +526,44 @@ export default class NucleusSyncPlugin extends Plugin {
     await this.syncNow();
   }
 
-  async syncNow({ quiet = false } = {}): Promise<void> {
+  async syncNow({ quiet = false, reason = "manual" }: { quiet?: boolean; reason?: string } = {}): Promise<void> {
     if (!this.guard(quiet)) return;
     this.syncing = true;
     this.applyingRemote = true;
     this.setStatus("Nucleus: syncing…");
+    this.logEvent("sync-start", { reason });
     try {
       this.lastError = null;
+      // Mark only what existed before this pass as observed. A phone can upload
+      // a note while the Mac is between pull and push; recording the newest
+      // timestamp after the pass would swallow that news forever. Our own push
+      // may cause one cheap follow-up check, which is intentional and finite.
+      const observedAtStart = await this.getClient()
+        .latestChange()
+        .catch(() => this.lastSeenChange);
       const { pulled, pushed } = await syncBothWays(this.engineOptions());
-      // Our own writes moved the watermark; record it so the watcher does not
-      // immediately see them as somebody else's news.
-      this.lastSeenChange = await this.getClient().latestChange().catch(() => this.lastSeenChange);
+      this.lastSeenChange = observedAtStart;
       await this.captureConfigSnapshot(true);
       this.announce(pulled, pushed, quiet);
+      this.logEvent("sync-finish", {
+        reason,
+        downloaded: pulled.downloaded,
+        uploaded: pushed.uploaded,
+        deletedLocally: pulled.deletedLocally,
+        tombstoned: pushed.tombstoned,
+        conflicts: pulled.conflicts.length + pushed.conflicts.length,
+        failed: pulled.failed.length + pushed.failed.length,
+      });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.lastError = message;
-      // Always tell them, even on a quiet background pass — a silent failure
-      // that only shows as three words in the status bar is how someone ends
-      // up believing their notes are synced when they are not.
-      new Notice(`Nucleus sync failed: ${message}`, 15000);
+      this.logEvent("sync-error", { reason, message });
+      if (!quiet) new Notice(`Nucleus sync failed: ${message}`, 15000);
       console.error("[nucleus] sync failed", error);
       this.setStatus("Nucleus: failed — click to see why");
     } finally {
       this.syncing = false;
       this.applyingRemote = false;
-      this.liveNotice?.hide();
-      this.liveNotice = null;
       this.flushPendingLocalChange();
     }
   }
@@ -581,9 +603,7 @@ export default class NucleusSyncPlugin extends Plugin {
       ? `This sync: ${bits.join(", ")}.`
       : "Nothing had changed since last time.";
 
-    // Conflicts and failures are announced even on a quiet background pass: a
-    // silently duplicated note is exactly the thing a person needs told.
-    if (conflicts) {
+    if (!quiet && conflicts) {
       new Notice(
         `Nucleus kept both versions of ${conflicts} file(s). Note conflicts are beside the original; settings/plugin conflicts are in “Nucleus Config Conflicts”.`,
         8000,
@@ -594,10 +614,12 @@ export default class NucleusSyncPlugin extends Plugin {
         .slice(0, 3)
         .map((f) => `${f.path}: ${f.reason}`)
         .join("\n");
-      new Notice(
-        `Nucleus could not transfer ${failed} file(s). Syncing again retries them.\n${names}`,
-        15000,
-      );
+      if (!quiet) {
+        new Notice(
+          `Nucleus could not transfer ${failed} file(s). Syncing again retries them.\n${names}`,
+          15000,
+        );
+      }
       this.lastError = names;
       this.setStatus("Nucleus: incomplete — click for details");
     }
@@ -620,7 +642,7 @@ export default class NucleusSyncPlugin extends Plugin {
   private registerChangeHandlers(): void {
     const schedule = debounce(
       () => {
-        if (this.settings.syncOnChange && !this.applyingRemote) void this.syncNow({ quiet: true });
+        if (this.settings.syncOnChange && !this.applyingRemote) void this.syncNow({ quiet: true, reason: "local-change" });
       },
       // Two seconds, not eight: this is the delay before YOUR edit starts
       // travelling. Long enough that a burst of typing is one sync, short
@@ -655,7 +677,7 @@ export default class NucleusSyncPlugin extends Plugin {
         this.pendingLocalChange = true;
         return;
       }
-      if (this.configured) void this.syncNow({ quiet: true });
+      if (this.configured) void this.syncNow({ quiet: true, reason: "local-change" });
     }, 250);
   }
 
@@ -699,7 +721,7 @@ export default class NucleusSyncPlugin extends Plugin {
     const minutes = this.settings.syncEveryMinutes;
     if (!minutes || minutes <= 0) return;
     this.periodicTimer = window.setInterval(() => {
-        if (this.configured && !this.syncing) void this.syncNow({ quiet: true });
+        if (this.configured && !this.syncing) void this.syncNow({ quiet: true, reason: "timer" });
       }, minutes * 60_000);
   }
 
@@ -717,6 +739,7 @@ export default class NucleusSyncPlugin extends Plugin {
     const options = {
       enabled: true,
       includeCaches: this.settings.syncPluginCaches,
+      includeWorkspace: this.settings.syncWorkspace,
     };
     const paths = await listConfigFiles(this.app, options);
     const parts: string[] = [];
@@ -750,7 +773,7 @@ export default class NucleusSyncPlugin extends Plugin {
       }
       if (next === this.configSnapshot) return;
       this.configSnapshot = next;
-      await this.syncNow({ quiet: true });
+      await this.syncNow({ quiet: true, reason: "config-change" });
     } catch {
       // The next poll retries. A config watcher should not spam notices merely
       // because one plugin was replacing a file at the instant we listed it.
@@ -767,7 +790,7 @@ export default class NucleusSyncPlugin extends Plugin {
       // Do not discard the first observation. Startup sync is optional, and if
       // it is disabled this may be the only chance to fetch edits made while
       // Obsidian was closed.
-      if (latest !== null) await this.syncNow({ quiet: true });
+      if (latest !== null) await this.syncNow({ quiet: true, reason: "remote-change" });
     } catch {
       // A failed check is not worth telling anyone about — the next one is a
       // few seconds away, and a notice every five seconds on a flaky

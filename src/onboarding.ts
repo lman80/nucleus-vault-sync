@@ -42,7 +42,7 @@ export interface Survey {
 export async function survey(
   app: App,
   client: NucleusClient,
-  config: ConfigSyncOptions = { enabled: true, includeCaches: false },
+  config: ConfigSyncOptions = { enabled: true, includeCaches: false, includeWorkspace: false },
 ): Promise<Survey> {
   // A vault with no notes can still contain its entire Obsidian setup. Treating
   // that as empty made first setup do nothing and left plugins/preferences

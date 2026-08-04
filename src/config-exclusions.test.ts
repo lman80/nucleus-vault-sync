@@ -21,13 +21,25 @@ import { mayWriteConfigPath, OWN_DATA_FILE } from "./core/config-paths";
 
 const app = ".obsidian";
 
-const on = { enabled: true, includeCaches: false };
-const withCaches = { enabled: true, includeCaches: true };
-const off = { enabled: false, includeCaches: false };
+const on = { enabled: true, includeCaches: false, includeWorkspace: false };
+const withCaches = { enabled: true, includeCaches: true, includeWorkspace: false };
+const withWorkspace = { enabled: true, includeCaches: false, includeWorkspace: true };
+const off = { enabled: false, includeCaches: false, includeWorkspace: false };
 
 test("our own data.json is never written, even on the way down", () => {
   assert.equal(mayWriteConfigPath(app, `.obsidian/${OWN_DATA_FILE}`, on), false);
   assert.equal(mayWriteConfigPath(app, `.obsidian/${OWN_DATA_FILE}`, withCaches), false);
+});
+
+test("our own diagnostic log is device-local and cannot cause a sync loop", () => {
+  assert.equal(
+    mayWriteConfigPath(
+      ".obsidian",
+      ".obsidian/plugins/nucleus-vault-sync/sync-log.jsonl",
+      on,
+    ),
+    false,
+  );
 });
 
 test("another plugin's data.json IS synced — only ours is special", () => {
@@ -42,9 +54,11 @@ test("plugin code, themes and snippets are synced", () => {
   assert.equal(mayWriteConfigPath(app, ".obsidian/hotkeys.json", on), true);
 });
 
-test("workspace layout IS synced — everything means everything", () => {
-  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace.json", on), true);
-  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace-mobile.json", on), true);
+test("volatile workspace layout is off by default and available explicitly", () => {
+  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace.json", on), false);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace-mobile.json", on), false);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace.json", withWorkspace), true);
+  assert.equal(mayWriteConfigPath(app, ".obsidian/workspace-mobile.json", withWorkspace), true);
 });
 
 test("which plugins are enabled, and their settings, are synced", () => {

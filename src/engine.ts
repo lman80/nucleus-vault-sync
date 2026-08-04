@@ -28,11 +28,14 @@ import { normalizePath, TFile as TFileClass, TFolder as TFolderClass } from "obs
 import { decide, renderNote, conflictName } from "./core/decide";
 import { splitFrontmatter, extractTags, extractLinks, titleFor, mimeFor, sha256, uuidV5 } from "./core/parse";
 import type { DocumentRow, SyncRecord, SyncState } from "./core/types";
+import { localTimesMatch, remoteTimesPresent, timesFor, timesKey } from "./core/timestamps";
 import type { NucleusClient } from "./client";
 import {
   isExcludedVaultPath,
   isManagedRemoteDocument,
   isManagedRemotePath,
+  mayTombstoneRemoteDocument,
+  deletionsAllowedAfterPull,
 } from "./core/sync-scope";
 import {
   listConfigFiles,
@@ -402,15 +405,6 @@ export async function removeEmptyFolders(
  * while leaving every note's contents perfect. The data was right and the shelf
  * it sat on was wrong.
  */
-function timesFor(row: DocumentRow): { ctime?: number; mtime?: number } {
-  const created = row.file_created_at ? Date.parse(row.file_created_at) : NaN;
-  const modified = row.file_modified_at ? Date.parse(row.file_modified_at) : NaN;
-  const out: { ctime?: number; mtime?: number } = {};
-  if (Number.isFinite(created)) out.ctime = created;
-  if (Number.isFinite(modified)) out.mtime = modified;
-  return out;
-}
-
 /**
  * Return the recorded disk hash without reopening the file when its cheap
  * metadata proves that it is still the same file we recorded.
@@ -436,7 +430,7 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   const result = emptyResult();
 
   const files = vaultFiles(app);
-  const configOpts = options.config ?? { enabled: false, includeCaches: false };
+  const configOpts = options.config ?? { enabled: false, includeCaches: false, includeWorkspace: false };
   onProgress(0, 1, "checking what has changed here…");
   const configPaths = await listConfigFiles(app, configOpts);
   const remote = await client.listDocumentsSlim();
@@ -469,6 +463,17 @@ export async function push(options: EngineOptions): Promise<PassResult> {
         record.mtime === file.stat.mtime &&
         record.layerHash === existing.content_hash
       ) {
+        // Once present, server dates are authoritative. A phone whose provider
+        // cannot set ctime must never overwrite the correct original date on
+        // every later push. Only backfill rows created by older builds that
+        // have no date metadata at all.
+        if (!remoteTimesPresent(existing)) {
+          await client.patchDocument(existing.id, {
+            file_created_at: new Date(file.stat.ctime).toISOString(),
+            file_modified_at: new Date(file.stat.mtime).toISOString(),
+          });
+          log(`repaired server dates for ${file.path}`);
+        }
         result.unchanged += 1;
         continue;
       }
@@ -476,12 +481,21 @@ export async function push(options: EngineOptions): Promise<PassResult> {
       const row = await describeFile(app, file, vaultName);
 
       if (existing && existing.content_hash === row.content_hash) {
+        if (!remoteTimesPresent(existing)) {
+          await client.patchDocument(existing.id, {
+            file_created_at: row.file_created_at ?? null,
+            file_modified_at: row.file_modified_at ?? null,
+          });
+          log(`repaired server dates for ${file.path}`);
+        }
         result.unchanged += 1;
         state[file.path] = {
           layerHash: row.content_hash ?? null,
           diskHash: row.content_hash ?? null,
           size: file.stat.size,
           mtime: file.stat.mtime,
+          ctime: file.stat.ctime,
+          timesKey: timesKey(row),
           at: new Date().toISOString(),
         };
         continue;
@@ -498,11 +512,14 @@ export async function push(options: EngineOptions): Promise<PassResult> {
 
       await client.upsertDocuments([{ ...row, id: existing?.id ?? row.id }]);
       result.uploaded += 1;
+      log(`uploaded ${file.path}`);
       state[file.path] = {
         layerHash: row.content_hash ?? null,
         diskHash: row.content_hash ?? null,
         size: file.stat.size,
         mtime: file.stat.mtime,
+        ctime: file.stat.ctime,
+        timesKey: timesKey(row),
         at: new Date().toISOString(),
       };
     } catch (error) {
@@ -592,10 +609,21 @@ export async function push(options: EngineOptions): Promise<PassResult> {
       attachmentLimitBytes: options.attachmentLimitBytes ?? Number.POSITIVE_INFINITY,
     }),
   );
-  const gone =
-    options.deleteRemoteMissing === false
-      ? []
-      : managedRemote.filter((row) => !seen.has(row.source_ref));
+  const scope = {
+    config: configOpts,
+    attachments: options.attachments ?? "all",
+    attachmentLimitBytes: options.attachmentLimitBytes ?? Number.POSITIVE_INFINITY,
+  } as const;
+  const gone = managedRemote.filter((row) =>
+    mayTombstoneRemoteDocument(
+      app.vault.configDir,
+      row,
+      state[row.source_ref],
+      seen.has(row.source_ref),
+      scope,
+      options.deleteRemoteMissing !== false,
+    ),
+  );
   const liveCount = managedRemote.length;
   if (liveCount >= 20 && gone.length / liveCount > 0.5) {
     log(
@@ -610,8 +638,14 @@ export async function push(options: EngineOptions): Promise<PassResult> {
   const now = new Date().toISOString();
   for (const row of gone) {
     try {
-      await client.patchDocument(row.id, { deleted_at: now });
+      if (!row.content_hash) continue;
+      const deleted = await client.tombstoneDocument(row.id, row.content_hash, now);
+      if (!deleted) {
+        log(`kept ${row.source_ref}; it changed remotely while deletion was being checked`);
+        continue;
+      }
       result.tombstoned += 1;
+      log(`tombstoned ${row.source_ref}`);
       delete state[row.source_ref];
     } catch (error) {
       result.failed.push({
@@ -641,7 +675,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
   // Metadata only — see client.listDocumentsMeta for why this matters. Bodies
   // are fetched below, for the short list that is actually going to be written.
   const fetched = await client.listDocumentsMeta();
-  const configOpts = options.config ?? { enabled: false, includeCaches: false };
+  const configOpts = options.config ?? { enabled: false, includeCaches: false, includeWorkspace: false };
 
   // Two phases: everything that makes the vault WORK, then the heavy files.
   //
@@ -821,6 +855,15 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
         const { action } = decide({ row, onDisk: onDiskHash, record: state[row.source_ref] });
         if (action === "none") {
           result.unchanged += 1;
+          if (info) {
+            state[row.source_ref] = {
+              layerHash: row.content_hash ?? null,
+              diskHash: onDiskHash,
+              size: info.size,
+              mtime: info.mtime,
+              at: new Date().toISOString(),
+            };
+          }
           continue;
         }
         if (action === "delete") {
@@ -828,6 +871,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
             await removeConfigFile(app, row.source_ref);
             delete state[row.source_ref];
             result.deletedLocally += 1;
+            log(`removed local config ${row.source_ref} after remote deletion`);
           }
           continue;
         }
@@ -872,6 +916,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
           at: new Date().toISOString(),
         };
         result.downloaded += 1;
+        log(`downloaded config ${row.source_ref}`);
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         log(`could not write ${row.source_ref}: ${reason}`);
@@ -925,6 +970,36 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
 
     const { action } = decide({ row, onDisk, record: state[row.source_ref] });
     if (action === "none") {
+      // v0.12 downloaded correct bytes but did not preserve their dates. A
+      // content no-op must therefore still reconcile metadata once. Recording
+      // the desired pair prevents endless rewrites on filesystems that cannot
+      // represent an exact creation time (notably some iOS providers).
+      if (file && onDisk === row.content_hash) {
+        const wantedTimes = timesFor(row);
+        const key = timesKey(row);
+        const record = state[row.source_ref];
+        if (
+          isMarkdown(path) &&
+          !localTimesMatch(file.stat, wantedTimes) &&
+          record?.timesKey !== key
+        ) {
+          try {
+            await app.vault.modify(file, await app.vault.read(file), wantedTimes);
+            log(`repaired local dates for ${row.source_ref}`);
+          } catch (error) {
+            log(`could not repair local dates for ${row.source_ref}: ${error instanceof Error ? error.message : String(error)}`);
+          }
+        }
+        state[row.source_ref] = {
+          layerHash: row.content_hash ?? null,
+          diskHash: onDisk,
+          size: file.stat.size,
+          mtime: file.stat.mtime,
+          ctime: file.stat.ctime,
+          timesKey: key,
+          at: new Date().toISOString(),
+        };
+      }
       result.unchanged += 1;
       continue;
     }
@@ -938,6 +1013,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
           await app.fileManager.trashFile(file);
           delete state[row.source_ref];
           result.deletedLocally += 1;
+          log(`moved ${row.source_ref} to trash after remote deletion`);
         }
         continue;
       }
@@ -988,6 +1064,7 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
 
       if (action === "conflict") {
         result.conflicts.push({ path: row.source_ref, savedAs: target });
+        log(`kept conflict for ${row.source_ref} as ${target}`);
         // Deliberately no state update: the two sides have NOT agreed, and
         // recording that they had would make the next pass overwrite the file
         // this one just protected.
@@ -1000,8 +1077,11 @@ export async function pull(options: EngineOptions): Promise<PassResult> {
           diskHash: await sha256(bytes),
           size: writtenFile?.stat.size,
           mtime: writtenFile?.stat.mtime,
+          ctime: writtenFile?.stat.ctime,
+          timesKey: timesKey(row),
           at: new Date().toISOString(),
         };
+        log(`downloaded ${row.source_ref}`);
       }
 
       // Checkpoint as we go: iOS can suspend the app mid-pass, and a run that
@@ -1153,6 +1233,15 @@ export async function repairDates(options: EngineOptions): Promise<{ checked: nu
 /** One full pass: pull first so local edits are never sent into a conflict, then push. */
 export async function syncBothWays(options: EngineOptions): Promise<{ pulled: PassResult; pushed: PassResult }> {
   const pulled = await pull(options);
-  const pushed = await push(options);
+  // A partial pull is never allowed to turn its missing local files into
+  // remote deletions. Uploads can still proceed; tombstones wait for a clean
+  // pass in which this device successfully observed every managed row.
+  const pushed = await push({
+    ...options,
+    deleteRemoteMissing: deletionsAllowedAfterPull(
+      options.deleteRemoteMissing !== false,
+      pulled.failed.length,
+    ),
+  });
   return { pulled, pushed };
 }

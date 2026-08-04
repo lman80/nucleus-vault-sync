@@ -56,6 +56,8 @@ export interface NucleusSettings {
   syncConfig: boolean;
   /** Include plugin caches that rewrite themselves constantly. */
   syncPluginCaches: boolean;
+  /** Carry volatile pane/tab layout between devices. */
+  syncWorkspace: boolean;
 }
 
 export const DEFAULT_SETTINGS: NucleusSettings = {
@@ -77,6 +79,7 @@ export const DEFAULT_SETTINGS: NucleusSettings = {
   attachmentLimitBytes: 25 * 1024 * 1024,
   syncConfig: true,
   syncPluginCaches: false,
+  syncWorkspace: false,
 };
 
 export class NucleusSettingTab extends PluginSettingTab {
@@ -244,9 +247,9 @@ export class NucleusSettingTab extends PluginSettingTab {
       .setName("Sync everything else in the vault")
       .setDesc(
         "Which plugins are enabled, every plugin's own settings, themes, snippets, hotkeys, " +
-          "appearance, graph settings, workspace layout — the whole .obsidian folder. The only " +
-          "thing never sent is this plugin's own settings file, because it holds your key and " +
-          "this device's sync record, which has to differ per device.",
+          "appearance, and graph settings. Device-specific open tabs/layout and regenerable " +
+          "caches stay local unless enabled below. This plugin's own settings and sync log never " +
+          "leave the device because they contain its key and private reconciliation record.",
       )
       .addToggle((t) =>
         t.setValue(this.plugin.settings.syncConfig).onChange(async (v) => {
@@ -267,6 +270,20 @@ export class NucleusSettingTab extends PluginSettingTab {
         .addToggle((t) =>
           t.setValue(this.plugin.settings.syncPluginCaches).onChange(async (v) => {
             this.plugin.settings.syncPluginCaches = v;
+            await this.plugin.saveSettings();
+            this.plugin.rescheduleTimer();
+          }),
+        );
+
+      new Setting(containerEl)
+        .setName("Sync open tabs and pane layout")
+        .setDesc(
+          "Off by default. Desktop and phone use different layouts, and these files change " +
+            "constantly. Plugins, preferences, themes, hotkeys, and add-ons still sync.",
+        )
+        .addToggle((t) =>
+          t.setValue(this.plugin.settings.syncWorkspace).onChange(async (v) => {
+            this.plugin.settings.syncWorkspace = v;
             await this.plugin.saveSettings();
             this.plugin.rescheduleTimer();
           }),
@@ -342,6 +359,11 @@ export class NucleusSettingTab extends PluginSettingTab {
       );
 
     containerEl.createEl("h3", { text: "Trouble" });
+
+    new Setting(containerEl)
+      .setName("Sync log")
+      .setDesc("Shows quiet background activity and errors without filling the screen with pop-ups.")
+      .addButton((b) => b.setButtonText("Open log").onClick(() => void this.plugin.openSyncLog()));
 
     new Setting(containerEl)
       .setName("Forget what this device has synced")

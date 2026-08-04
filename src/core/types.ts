@@ -93,6 +93,10 @@ export interface SyncRecord {
    */
   size?: number;
   mtime?: number;
+  /** Creation time last observed on this device. */
+  ctime?: number;
+  /** Desired server timestamp pair already applied (or attempted) here. */
+  timesKey?: string;
 }
 
 /** Per-file sync state, keyed by vault-relative path. */

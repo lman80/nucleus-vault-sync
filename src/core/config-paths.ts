@@ -10,6 +10,8 @@
 
 /** This plugin's own settings file, relative to the config directory. */
 export const OWN_DATA_FILE = "plugins/nucleus-vault-sync/data.json";
+/** Persistent diagnostics are device-local and must never trigger sync. */
+export const OWN_LOG_FILE = "plugins/nucleus-vault-sync/sync-log.jsonl";
 
 /**
  * Caches that rewrite themselves continuously.
@@ -25,6 +27,8 @@ export interface ConfigSyncOptions {
   enabled: boolean;
   /** Include plugin caches that rewrite themselves constantly. */
   includeCaches: boolean;
+  /** Sync ephemeral pane/tab layout files. Off by default to prevent churn. */
+  includeWorkspace: boolean;
 }
 
 /** A server-provided path must stay vault-relative after normalisation. */
@@ -50,7 +54,13 @@ export function isExcludedConfigPath(relative: string, options: ConfigSyncOption
   // record, and that record is *supposed* to differ per device: it is the only
   // thing that distinguishes "changed here" from "changed there". Copying it
   // between devices would break conflict detection on all of them at once.
-  if (relative === OWN_DATA_FILE) return true;
+  if (relative === OWN_DATA_FILE || relative === OWN_LOG_FILE) return true;
+  if (
+    !options.includeWorkspace &&
+    (relative === "workspace.json" || relative === "workspace-mobile.json")
+  ) {
+    return true;
+  }
   if (!options.includeCaches && CACHE_DIRS.some((d) => relative === d || relative.startsWith(`${d}/`))) {
     return true;
   }

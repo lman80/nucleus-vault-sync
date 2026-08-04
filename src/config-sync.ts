@@ -35,10 +35,11 @@ import {
   isConfigPath as isConfigPathPure,
   mayWriteConfigPath as mayWriteConfigPathPure,
   OWN_DATA_FILE,
+  OWN_LOG_FILE,
   type ConfigSyncOptions,
 } from "./core/config-paths";
 
-export { OWN_DATA_FILE, type ConfigSyncOptions };
+export { OWN_DATA_FILE, OWN_LOG_FILE, type ConfigSyncOptions };
 
 /** True when a path belongs to this vault's config directory. */
 export function isConfigPath(app: App, path: string): boolean {

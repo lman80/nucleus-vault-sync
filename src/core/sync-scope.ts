@@ -4,6 +4,7 @@ import {
   mayWriteConfigPath,
   type ConfigSyncOptions,
 } from "./config-paths";
+import type { SyncRecord } from "./types";
 
 /** Machine-owned or regenerable trees that are not part of the synced vault. */
 export const EXCLUDED_PREFIXES = [
@@ -67,4 +68,31 @@ export function isManagedRemoteDocument(
     scope.attachments === "under-limit" &&
     (row.byte_size ?? 0) > scope.attachmentLimitBytes
   );
+}
+
+/**
+ * The proof required before absence on this device may delete a shared row.
+ *
+ * Merely appearing in the second listing of a two-way pass is not proof: it may
+ * have been created by another device after this device's pull snapshot. The
+ * local reconciliation record must show that this device previously held and
+ * agreed with this exact remote hash.
+ */
+export function mayTombstoneRemoteDocument(
+  configDir: string,
+  row: RemoteScopeEntry & { content_hash?: string | null },
+  record: SyncRecord | undefined,
+  seenLocally: boolean,
+  scope: DeviceSyncScope,
+  deletionEnabled: boolean,
+): boolean {
+  if (!deletionEnabled || seenLocally) return false;
+  if (!isManagedRemoteDocument(configDir, row, scope)) return false;
+  if (!record || record.diskHash === null || record.layerHash === null) return false;
+  return record.layerHash === (row.content_hash ?? null);
+}
+
+/** A failed pull makes the device's view incomplete, so deletion is unsafe. */
+export function deletionsAllowedAfterPull(requested: boolean, failedCount: number): boolean {
+  return requested && failedCount === 0;
 }

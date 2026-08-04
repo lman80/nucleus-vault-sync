@@ -92,7 +92,7 @@ const DEFAULT_MAX_REQUESTURL_BINARY_BYTES = 8 * 1024 * 1024;
  * from `fetch` as a forbidden header name, and asking for it would achieve
  * nothing except widening the CORS preflight.
  */
-const USER_AGENT = "ObsidianNucleus/0.13.0";
+const USER_AGENT = "ObsidianNucleus/0.14.0";
 
 /**
  * Faults worth trying again rather than giving up on. The last few entries are
@@ -122,6 +122,8 @@ export interface DocRowSlim {
   content_hash: string | null;
   storage_path: string | null;
   byte_size: number | null;
+  file_created_at: string | null;
+  file_modified_at: string | null;
   deleted_at: string | null;
 }
 
@@ -543,7 +545,7 @@ export class NucleusClient {
 
   async listDocumentsSlim(): Promise<DocRowSlim[]> {
     return this.listPaged<DocRowSlim>(
-      "id,source_ref,kind,content_hash,storage_path,byte_size,deleted_at",
+      "id,source_ref,kind,content_hash,storage_path,byte_size,file_created_at,file_modified_at,deleted_at",
     );
   }
 
@@ -653,6 +655,29 @@ export class NucleusClient {
       prefer: "return=minimal",
       body: JSON.stringify(patch),
     });
+  }
+
+  /**
+   * Tombstone only if the row is still the exact version the caller observed.
+   * A second device may edit between listing and PATCH; an id-only update would
+   * otherwise erase that newer edit. PostgREST applies all filters atomically.
+   */
+  async tombstoneDocument(
+    id: string,
+    expectedHash: string,
+    deletedAt: string,
+  ): Promise<boolean> {
+    const res = await this.rest(
+      `/rest/v1/documents?id=eq.${encodeURIComponent(id)}` +
+        `&content_hash=eq.${encodeURIComponent(expectedHash)}` +
+        `&deleted_at=is.null&select=id`,
+      {
+        method: "PATCH",
+        prefer: "return=representation",
+        body: JSON.stringify({ deleted_at: deletedAt }),
+      },
+    );
+    return this.rows<{ id: string }>(res).length === 1;
   }
 
   // ----------------------------------------------------------------- storage

@@ -1,10 +1,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { isManagedRemoteDocument, isManagedRemotePath } from "./sync-scope";
+import {
+  isManagedRemoteDocument,
+  isManagedRemotePath,
+  mayTombstoneRemoteDocument,
+  deletionsAllowedAfterPull,
+} from "./sync-scope";
 
-const on = { enabled: true, includeCaches: false };
-const off = { enabled: false, includeCaches: false };
+const on = { enabled: true, includeCaches: false, includeWorkspace: false };
+const off = { enabled: false, includeCaches: false, includeWorkspace: false };
 
 test("ordinary vault files remain managed", () => {
   assert.equal(isManagedRemotePath(".obsidian", "Notes/Today.md", on), true);
@@ -89,4 +94,57 @@ test("binary plugin files stay managed even on a notes-only device", () => {
     ),
     true,
   );
+});
+
+test("a remote file first seen after pull can never be mistaken for a local deletion", () => {
+  const row = { source_ref: "Phone note.md", kind: "note", content_hash: "phone" };
+  const scope = { config: on, attachments: "all" as const, attachmentLimitBytes: Infinity };
+  assert.equal(
+    mayTombstoneRemoteDocument(".obsidian", row, undefined, false, scope, true),
+    false,
+  );
+});
+
+test("a missing local file is deleted remotely only after exact prior agreement", () => {
+  const row = { source_ref: "Old note.md", kind: "note", content_hash: "agreed" };
+  const scope = { config: on, attachments: "all" as const, attachmentLimitBytes: Infinity };
+  assert.equal(
+    mayTombstoneRemoteDocument(
+      ".obsidian",
+      row,
+      { layerHash: "agreed", diskHash: "agreed" },
+      false,
+      scope,
+      true,
+    ),
+    true,
+  );
+  assert.equal(
+    mayTombstoneRemoteDocument(
+      ".obsidian",
+      row,
+      { layerHash: "older", diskHash: "older" },
+      false,
+      scope,
+      true,
+    ),
+    false,
+  );
+  assert.equal(
+    mayTombstoneRemoteDocument(
+      ".obsidian",
+      { ...row, content_hash: null },
+      { layerHash: null, diskHash: "previous-bytes" },
+      false,
+      scope,
+      true,
+    ),
+    false,
+  );
+});
+
+test("one failed download disables every remote deletion in that pass", () => {
+  assert.equal(deletionsAllowedAfterPull(true, 0), true);
+  assert.equal(deletionsAllowedAfterPull(true, 1), false);
+  assert.equal(deletionsAllowedAfterPull(false, 0), false);
 });
